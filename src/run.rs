@@ -1,5 +1,6 @@
 use crate::event::Event;
 use crate::runner::RunMsg;
+use crate::trajectory::Trajectory;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
@@ -12,6 +13,7 @@ pub enum RunStatus {
 pub struct Run {
     pub prompt: String,
     pub lines: Vec<String>,
+    pub trajectory: Trajectory,
     pub status: RunStatus,
     pub error: Option<String>,
     result_is_error: Option<bool>,
@@ -22,6 +24,7 @@ impl Run {
         Run {
             prompt: prompt.to_string(),
             lines: Vec::new(),
+            trajectory: Trajectory::default(),
             status: RunStatus::Running,
             error: None,
             result_is_error: None,
@@ -43,6 +46,7 @@ impl Run {
                     self.result_is_error = Some(result.is_error);
                 }
                 self.lines.push(event_line(&event));
+                self.trajectory.push(&event);
             }
             RunMsg::Exited { code, stderr } => {
                 self.status = final_status(self.result_is_error, code);
@@ -135,6 +139,19 @@ mod tests {
     #[test]
     fn a_signal_is_failed_even_after_a_successful_result() {
         assert_eq!(finished(&[OK_RESULT], None, &[]).status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn apply_builds_the_trajectory() {
+        let run = finished(
+            &[r#"{"type":"assistant","message":{"content":"hi"}}"#],
+            Some(0),
+            &[],
+        );
+        assert_eq!(
+            run.trajectory.nodes,
+            [crate::trajectory::Node::Text("hi".into())]
+        );
     }
 
     #[test]
