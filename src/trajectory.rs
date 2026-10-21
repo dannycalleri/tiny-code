@@ -22,6 +22,15 @@ pub struct Tool {
     pub input: Value,
     pub summary: String,
     pub result: Option<ToolResult>,
+    pub status: ToolStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStatus {
+    Running,
+    Ok,
+    Error,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +46,16 @@ pub struct Trajectory {
 }
 
 impl Trajectory {
+    pub fn interrupt_open_tools(&mut self) {
+        for node in &mut self.nodes {
+            if let Node::Tool(tool) = node
+                && tool.status == ToolStatus::Running
+            {
+                tool.status = ToolStatus::Interrupted;
+            }
+        }
+    }
+
     pub fn push(&mut self, event: &Event) {
         match event {
             Event::System(s) if s.subtype == "init" => {
@@ -87,6 +106,7 @@ impl Trajectory {
                     input: input.clone(),
                     summary: input_summary(name, input),
                     result: None,
+                    status: ToolStatus::Running,
                 }));
             }
             ContentBlock::ToolResult {
@@ -99,7 +119,14 @@ impl Trajectory {
                     is_error: *is_error,
                 };
                 match self.tools.get(tool_use_id).map(|&id| &mut self.nodes[id]) {
-                    Some(Node::Tool(tool)) => tool.result = Some(result),
+                    Some(Node::Tool(tool)) => {
+                        tool.status = if result.is_error {
+                            ToolStatus::Error
+                        } else {
+                            ToolStatus::Ok
+                        };
+                        tool.result = Some(result);
+                    }
                     _ => self.nodes.push(Node::System(format!(
                         "result for unknown call {tool_use_id}"
                     ))),
@@ -248,6 +275,31 @@ mod tests {
                 Node::System("unknown event stream_event".into())
             ]
         );
+    }
+
+    #[test]
+    fn tool_status_follows_its_result() {
+        let t = trajectory(include_str!("../tests/fixtures/tools.jsonl"));
+        let statuses: Vec<ToolStatus> = tools(&t).iter().map(|t| t.status).collect();
+        assert_eq!(
+            statuses,
+            [ToolStatus::Ok, ToolStatus::Ok, ToolStatus::Error]
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_result_is_running_until_interrupted() {
+        let mut t = trajectory(concat!(
+            r#"{"type":"assistant","message":{"content":["#,
+            r#"{"type":"tool_use","id":"a","name":"Bash","input":{}},"#,
+            r#"{"type":"tool_use","id":"b","name":"Read","input":{}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"ok"}]}}"#,
+        ));
+        assert_eq!(tools(&t)[0].status, ToolStatus::Running);
+        t.interrupt_open_tools();
+        let statuses: Vec<ToolStatus> = tools(&t).iter().map(|t| t.status).collect();
+        assert_eq!(statuses, [ToolStatus::Interrupted, ToolStatus::Ok]);
     }
 
     #[test]

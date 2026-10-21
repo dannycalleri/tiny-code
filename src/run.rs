@@ -47,6 +47,7 @@ impl Run {
             }
             RunMsg::Exited { code, stderr } => {
                 self.status = final_status(self.result_is_error, code);
+                self.trajectory.interrupt_open_tools();
                 if self.status == RunStatus::Failed && !stderr.is_empty() {
                     self.error = Some(stderr.join("\n"));
                 }
@@ -119,6 +120,16 @@ mod tests {
     #[test]
     fn a_signal_is_failed_even_after_a_successful_result() {
         assert_eq!(finished(&[OK_RESULT], None, &[]).status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn open_tool_calls_are_interrupted_when_the_run_ends() {
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]}}"#;
+        let run = finished(&[call], Some(1), &[]);
+        let crate::trajectory::Node::Tool(tool) = &run.trajectory.nodes[0] else {
+            panic!()
+        };
+        assert_eq!(tool.status, crate::trajectory::ToolStatus::Interrupted);
     }
 
     #[test]
