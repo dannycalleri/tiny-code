@@ -1,0 +1,159 @@
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+
+use eframe::egui;
+use egui_commonmark::CommonMarkCache;
+
+use crate::run::{Run, RunStatus};
+use crate::runner::{self, RunMsg};
+use crate::transcript::{self, Follow};
+
+pub struct App {
+    dir: PathBuf,
+    claude: String,
+    prompt: String,
+    run: Option<Run>,
+    events: Option<Receiver<RunMsg>>,
+    markdown: CommonMarkCache,
+    follow: Follow,
+}
+
+impl App {
+    pub fn new(dir: PathBuf, claude: String) -> Self {
+        App {
+            dir,
+            claude,
+            prompt: String::new(),
+            run: None,
+            events: None,
+            markdown: CommonMarkCache::default(),
+            follow: Follow::default(),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|r| r.status == RunStatus::Running)
+    }
+
+    pub fn poll(&mut self) {
+        let (Some(events), Some(run)) = (&self.events, &mut self.run) else {
+            return;
+        };
+        while let Ok(msg) = events.try_recv() {
+            run.apply(msg);
+        }
+        if run.status != RunStatus::Running {
+            self.events = None;
+        }
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("top_bar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(self.dir.display().to_string());
+                if let Some(run) = &self.run {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(status_label(run.status));
+                    });
+                }
+            });
+        });
+        egui::Panel::bottom("composer").show(ui, |ui| {
+            let id = egui::Id::unique("composer_text");
+            let enter = ui.memory(|m| m.has_focus(id)) && ui.input_mut(take_send_key);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.prompt)
+                        .id(id)
+                        .desired_rows(2)
+                        .desired_width(ui.available_width() - 70.0)
+                        .hint_text("Ask Claude… (Enter sends, Shift+Enter adds a line)"),
+                );
+                let button = ui.add_enabled(!self.is_running(), egui::Button::new("Send"));
+                if enter || button.clicked() {
+                    self.send(ui.ctx());
+                }
+            });
+        });
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(run) = &self.run {
+                transcript::show(ui, run, &mut self.markdown, &mut self.follow);
+            }
+        });
+    }
+
+    fn send(&mut self, ctx: &egui::Context) {
+        let prompt = self.prompt.trim().to_string();
+        if prompt.is_empty() || self.is_running() {
+            return;
+        }
+        let cmd = runner::claude_command(&self.claude, &prompt, &self.dir);
+        let ctx = ctx.clone();
+        match runner::start(cmd, move || ctx.request_repaint()) {
+            Ok(events) => {
+                self.run = Some(Run::new(&prompt));
+                self.events = Some(events);
+            }
+            Err(error) => self.run = Some(Run::failed_to_start(&prompt, error)),
+        }
+        self.prompt.clear();
+        self.follow = Follow::default();
+    }
+}
+
+impl eframe::App for App {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show(ui);
+    }
+}
+
+fn take_send_key(input: &mut egui::InputState) -> bool {
+    // consume_key ignores an extra Shift, so without this check Shift+Enter would also send.
+    !input.modifiers.shift && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+}
+
+fn status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => "⏺ running",
+        RunStatus::Done => "✔ done",
+        RunStatus::Failed => "✖ failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enter_pressed(modifiers: egui::Modifiers) -> egui::InputState {
+        let mut input = egui::InputState::default();
+        input.modifiers = modifiers;
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        input
+    }
+
+    #[test]
+    fn enter_sends_and_is_consumed() {
+        let mut input = enter_pressed(egui::Modifiers::NONE);
+        assert!(take_send_key(&mut input));
+        assert!(input.events.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_does_not_send_and_reaches_the_text_edit() {
+        let mut input = enter_pressed(egui::Modifiers::SHIFT);
+        assert!(!take_send_key(&mut input));
+        assert_eq!(input.events.len(), 1);
+    }
+}
