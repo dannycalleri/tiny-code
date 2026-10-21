@@ -20,6 +20,7 @@ pub struct Tool {
     pub id: String,
     pub name: String,
     pub input: Value,
+    pub summary: String,
     pub result: Option<ToolResult>,
 }
 
@@ -84,6 +85,7 @@ impl Trajectory {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                    summary: input_summary(name, input),
                     result: None,
                 }));
             }
@@ -105,6 +107,36 @@ impl Trajectory {
             }
             ContentBlock::Other => {}
         }
+    }
+}
+
+fn input_summary(tool_name: &str, input: &Value) -> String {
+    let field = match tool_name {
+        "Bash" => Some("command"),
+        "Read" | "Edit" | "Write" => Some("file_path"),
+        "Grep" | "Glob" => Some("pattern"),
+        _ => None,
+    };
+    let known = field.and_then(|f| input[f].as_str());
+    let text = known.or_else(|| input.as_object()?.values().find_map(Value::as_str));
+    one_line(text.unwrap_or_default())
+}
+
+fn one_line(text: &str) -> String {
+    const MAX: usize = 120;
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let cut = match first.char_indices().nth(MAX) {
+        Some((at, _)) => &first[..at],
+        None => first,
+    };
+    if cut.len() < text.trim().len() {
+        format!("{cut}…")
+    } else {
+        cut.to_string()
     }
 }
 
@@ -235,6 +267,59 @@ mod tests {
             t.nodes,
             [Node::System("result for unknown call nope".into())]
         );
+    }
+
+    fn summary(name: &str, input: Value) -> String {
+        input_summary(name, &input)
+    }
+
+    #[test]
+    fn bash_summary_is_the_command() {
+        let input = serde_json::json!({"command": "ls -la", "description": "List files"});
+        assert_eq!(summary("Bash", input), "ls -la");
+    }
+
+    #[test]
+    fn file_tools_summary_is_the_path() {
+        for name in ["Read", "Edit", "Write"] {
+            let input =
+                serde_json::json!({"file_path": "/home/user/demo/notes.txt", "content": "x"});
+            assert_eq!(summary(name, input), "/home/user/demo/notes.txt", "{name}");
+        }
+    }
+
+    #[test]
+    fn search_tools_summary_is_the_pattern() {
+        for name in ["Grep", "Glob"] {
+            let input = serde_json::json!({"path": "src", "pattern": "fn main"});
+            assert_eq!(summary(name, input), "fn main", "{name}");
+        }
+    }
+
+    #[test]
+    fn a_known_tool_without_its_field_falls_back_to_the_first_string() {
+        let input = serde_json::json!({"description": "List files"});
+        assert_eq!(summary("Bash", input), "List files");
+    }
+
+    #[test]
+    fn unknown_tool_summary_is_the_first_string_value_on_one_line() {
+        let input = serde_json::json!({"count": 3, "query": "first line\nsecond line"});
+        assert_eq!(summary("mcp__search", input), "first line…");
+    }
+
+    #[test]
+    fn summary_is_empty_when_no_string_is_found() {
+        assert_eq!(summary("Mystery", serde_json::json!({"n": 1})), "");
+    }
+
+    #[test]
+    fn one_line_cuts_long_text_on_a_char_boundary() {
+        let cut = one_line(&"é".repeat(200));
+        assert_eq!(cut.chars().count(), 121);
+        assert!(cut.ends_with('…'));
+        assert_eq!(one_line("short"), "short");
+        assert_eq!(one_line("\n  cargo test\n"), "cargo test");
     }
 
     #[test]
