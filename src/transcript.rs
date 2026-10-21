@@ -2,7 +2,9 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::run::Run;
-use crate::trajectory::{Node, Tool};
+use crate::trajectory::{Node, Tool, ToolStatus};
+
+pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 
 #[derive(Debug, Default)]
 pub struct Follow {
@@ -86,12 +88,40 @@ fn tool_card(ui: &mut egui::Ui, tool: &Tool) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
+            status_icon(ui, tool.status);
             ui.strong(&tool.name);
             ui.add(
                 egui::Label::new(egui::RichText::new(&tool.summary).monospace().weak()).truncate(),
             );
         });
     });
+}
+
+fn status_icon(ui: &mut egui::Ui, status: ToolStatus) {
+    let visuals = ui.visuals();
+    let (glyph, color) = match status {
+        ToolStatus::Running => return quiet_spinner(ui),
+        ToolStatus::Ok => ("✔", OK_GREEN),
+        ToolStatus::Error => ("✖", visuals.error_fg_color),
+        ToolStatus::Interrupted => ("⏸", visuals.weak_text_color()),
+    };
+    ui.label(egui::RichText::new(glyph).color(color));
+}
+
+// egui::Spinner requests a repaint every frame; this one relies on App's 100 ms repaint instead.
+fn quiet_spinner(ui: &mut egui::Ui) {
+    let size = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let radius = rect.height() * 0.5 - 2.0;
+    let start = ui.input(|i| i.time) * std::f64::consts::TAU;
+    let points: Vec<egui::Pos2> = (0..12)
+        .map(|i| {
+            let (sin, cos) = (start + f64::from(i) * 0.4).sin_cos();
+            rect.center() + radius * egui::vec2(cos as f32, sin as f32)
+        })
+        .collect();
+    let stroke = egui::Stroke::new(2.0, ui.visuals().strong_text_color());
+    ui.painter().add(egui::Shape::line(points, stroke));
 }
 
 #[cfg(test)]

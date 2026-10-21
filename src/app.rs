@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use eframe::egui;
 use egui_commonmark::CommonMarkCache;
@@ -50,12 +51,15 @@ impl App {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        if self.is_running() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.dir.display().to_string());
                 if let Some(run) = &self.run {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(status_label(run.status));
+                        status_badge(ui, run.status);
                     });
                 }
             });
@@ -118,12 +122,14 @@ fn take_send_key(input: &mut egui::InputState) -> bool {
     !input.modifiers.shift && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
 }
 
-fn status_label(status: RunStatus) -> &'static str {
-    match status {
-        RunStatus::Running => "⏺ running",
-        RunStatus::Done => "✔ done",
-        RunStatus::Failed => "✖ failed",
-    }
+fn status_badge(ui: &mut egui::Ui, status: RunStatus) {
+    let visuals = ui.visuals();
+    let (text, color) = match status {
+        RunStatus::Running => ("⏺ running", visuals.warn_fg_color),
+        RunStatus::Done => ("✔ done", transcript::OK_GREEN),
+        RunStatus::Failed => ("✖ failed", visuals.error_fg_color),
+    };
+    ui.label(egui::RichText::new(text).color(color).strong());
 }
 
 #[cfg(test)]
