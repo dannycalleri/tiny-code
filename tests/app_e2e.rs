@@ -27,9 +27,14 @@ fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
 }
 
 fn harness(claude: PathBuf) -> Harness<'static, App> {
+    harness_sized(claude, [900.0, 1400.0])
+}
+
+fn harness_sized(claude: PathBuf, size: [f32; 2]) -> Harness<'static, App> {
     let app = App::new(std::env::temp_dir(), claude.display().to_string());
     Harness::builder()
-        .with_size([900.0, 1400.0])
+        .with_size(size)
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 app.poll();
@@ -147,5 +152,34 @@ fn an_orphan_step_is_marked_and_steps_under_any_call_stay_visible() {
     harness.get_by_label("✔ Bash · ls · 0 steps").click();
     harness.run();
     harness.get_by_label("Nested under Bash");
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn clicking_a_nested_call_in_the_outline_opens_and_shows_its_card() {
+    let claude = fake_claude_for("subagents.jsonl", "outline");
+    let mut harness = harness_sized(claude.clone(), [1200.0, 420.0]);
+
+    send(&mut harness, "Start a nested subagent");
+    wait_for_the_run(&mut harness);
+
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Label, "Read")
+            .is_none()
+    );
+    harness.get_by_role_and_label(Role::Button, "Read").click();
+    harness.run();
+
+    let card = harness.get_by_role_and_label(Role::Label, "Read").rect();
+    let top = harness
+        .get_by_label(&std::env::temp_dir().display().to_string())
+        .rect()
+        .bottom();
+    let bottom = harness.get_by_role(Role::MultilineTextInput).rect().top();
+    assert!(
+        top < card.top() && card.bottom() < bottom,
+        "{card:?} not in {top}..{bottom}"
+    );
     let _ = std::fs::remove_file(claude);
 }

@@ -1,9 +1,11 @@
+use eframe::egui;
+
 use crate::run::Run;
 use crate::trajectory::{Node, NodeId, ToolStatus, Trajectory};
 
 pub const BREAKPOINT: f32 = 1100.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     Run(usize),
     Call(usize, NodeId),
@@ -43,6 +45,46 @@ fn calls<'a>(run: usize, trajectory: &'a Trajectory, ids: &[NodeId]) -> Vec<Entr
         .collect()
 }
 
+fn flatten<'e, 'a>(entries: &'e [Entry<'a>], depth: usize, out: &mut Vec<(usize, &'e Entry<'a>)>) {
+    for entry in entries {
+        out.push((depth, entry));
+        flatten(&entry.children, depth + 1, out);
+    }
+}
+
+pub fn show(ui: &mut egui::Ui, entries: &[Entry]) -> Option<Target> {
+    let mut lines = Vec::new();
+    flatten(entries, 0, &mut lines);
+    let row_height = ui.spacing().interact_size.y;
+    let mut clicked = None;
+    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+        ui,
+        row_height,
+        lines.len(),
+        |ui, range| {
+            for &(depth, entry) in &lines[range] {
+                ui.horizontal(|ui| {
+                    ui.add_space(depth as f32 * ui.spacing().indent);
+                    if let Some(status) = entry.status {
+                        crate::transcript::status_icon(ui, status);
+                    }
+                    let text = match entry.target {
+                        Target::Run(_) => egui::RichText::new(entry.label).strong(),
+                        Target::Call(..) => egui::RichText::new(entry.label),
+                    };
+                    if ui
+                        .add(egui::Button::new(text).frame(false).truncate())
+                        .clicked()
+                    {
+                        clicked = Some(entry.target);
+                    }
+                });
+            }
+        },
+    );
+    clicked
+}
+
 pub fn show_outline(width: f32, toggle: Option<bool>) -> bool {
     toggle.unwrap_or(width >= BREAKPOINT)
 }
@@ -60,11 +102,13 @@ mod tests {
         run
     }
 
-    fn shape(entries: &[Entry], depth: usize, out: &mut Vec<String>) {
-        for entry in entries {
-            out.push(format!("{}{}", "  ".repeat(depth), entry.label));
-            shape(&entry.children, depth + 1, out);
-        }
+    fn shape(entries: &[Entry]) -> Vec<String> {
+        let mut lines = Vec::new();
+        flatten(entries, 0, &mut lines);
+        lines
+            .iter()
+            .map(|(depth, entry)| format!("{}{}", "  ".repeat(*depth), entry.label))
+            .collect()
     }
 
     #[test]
@@ -76,10 +120,8 @@ mod tests {
             ),
             run("Read notes", include_str!("../tests/fixtures/tools.jsonl")),
         ];
-        let mut lines = Vec::new();
-        shape(&outline(&runs), 0, &mut lines);
         assert_eq!(
-            lines,
+            shape(&outline(&runs)),
             [
                 "Start a nested subagent",
                 "  Agent",

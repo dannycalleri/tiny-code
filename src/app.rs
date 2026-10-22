@@ -5,6 +5,7 @@ use std::time::Duration;
 use eframe::egui;
 use egui_commonmark::CommonMarkCache;
 
+use crate::outline;
 use crate::run::{Run, RunStatus};
 use crate::runner::{self, RunMsg, Stopper};
 use crate::session::Session;
@@ -19,6 +20,7 @@ pub struct App {
     stopper: Option<Stopper>,
     markdown: CommonMarkCache,
     view: View,
+    outline: Option<bool>,
 }
 
 impl App {
@@ -32,6 +34,7 @@ impl App {
             stopper: None,
             markdown: CommonMarkCache::default(),
             view: View::default(),
+            outline: None,
         }
     }
 
@@ -54,14 +57,18 @@ impl App {
         if self.is_running() {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
+        let show_outline = outline::show_outline(ui.max_rect().width(), self.outline);
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.dir.display().to_string());
-                if let Some(run) = self.session.current() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(show_outline, "Outline").clicked() {
+                        self.outline = Some(!show_outline);
+                    }
+                    if let Some(run) = self.session.current() {
                         status_badge(ui, run.status);
-                    });
-                }
+                    }
+                });
             });
         });
         if let Some(run) = self
@@ -98,6 +105,20 @@ impl App {
                 }
             });
         });
+        if show_outline {
+            let clicked = egui::Panel::right("outline")
+                .default_size(240.0)
+                .show(ui, |ui| {
+                    ui.strong("Outline");
+                    ui.separator();
+                    outline::show(ui, &outline::outline(&self.session.runs))
+                })
+                .inner;
+            if let Some(target) = clicked {
+                let now = ui.input(|i| i.time);
+                self.view.reveal(&self.session.runs, target, now);
+            }
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             transcript::show(ui, &self.session.runs, &mut self.markdown, &mut self.view);
         });

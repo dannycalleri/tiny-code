@@ -4,6 +4,7 @@ use std::ops::Range;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
+use crate::outline::Target;
 use crate::run::{Run, RunStats};
 use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus, Trajectory};
 
@@ -11,12 +12,56 @@ pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 
 type ItemKey = (usize, NodeId);
 
+const HIGHLIGHT_SECONDS: f64 = 1.0;
+
 #[derive(Debug, Default)]
 pub struct View {
     jump: bool,
-    show_all: HashSet<ItemKey>,
+    cards: Cards,
     heights: HashMap<Row, f32>,
     scroll_to: Option<f32>,
+    reveal_row: Option<Row>,
+}
+
+#[derive(Debug, Default)]
+struct Cards {
+    show_all: HashSet<ItemKey>,
+    open: HashSet<ItemKey>,
+    reveal: Option<ItemKey>,
+    highlight: Option<(ItemKey, f64)>,
+}
+
+impl Cards {
+    fn highlight_left(&self, key: ItemKey, now: f64) -> Option<f64> {
+        let (target, until) = self.highlight?;
+        (target == key && now < until).then_some(until - now)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Reveal {
+    row: Row,
+    open: Vec<ItemKey>,
+    item: Option<ItemKey>,
+}
+
+fn plan_reveal(runs: &[Run], target: Target) -> Reveal {
+    match target {
+        Target::Run(run) => Reveal {
+            row: Row::Prompt(run),
+            open: Vec::new(),
+            item: None,
+        },
+        Target::Call(run, id) => {
+            let ancestors = runs[run].trajectory.ancestors(id);
+            let root = ancestors.first().copied().unwrap_or(id);
+            Reveal {
+                row: Row::Item((run, root)),
+                open: ancestors.into_iter().map(|a| (run, a)).collect(),
+                item: Some((run, id)),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +96,14 @@ impl View {
     pub fn jump_to_latest(&mut self) {
         self.jump = true;
     }
+
+    pub fn reveal(&mut self, runs: &[Run], target: Target, now: f64) {
+        let plan = plan_reveal(runs, target);
+        self.reveal_row = Some(plan.row);
+        self.cards.open.extend(plan.open);
+        self.cards.reveal = plan.item;
+        self.cards.highlight = plan.item.map(|key| (key, now + HIGHLIGHT_SECONDS));
+    }
 }
 
 pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, view: &mut View) {
@@ -63,6 +116,7 @@ pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, vie
         area = area.vertical_scroll_offset(offset);
     }
     let output = area.show_viewport(ui, |ui, viewport| {
+        let origin = ui.cursor().top();
         let known: Vec<Option<f32>> = rows
             .iter()
             .map(|row| view.heights.get(row).copied())
@@ -71,12 +125,22 @@ pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, vie
             .iter()
             .map(|h| h.unwrap_or(ESTIMATED_ROW_HEIGHT))
             .collect();
+        if let Some(row) = view.reveal_row.take()
+            && let Some(index) = rows.iter().position(|&r| r == row)
+        {
+            let top = origin + heights[..index].iter().sum::<f32>();
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(ui.max_rect().left(), top),
+                egui::vec2(1.0, heights[index]),
+            );
+            ui.scroll_to_rect(rect, Some(egui::Align::TOP));
+        }
         let visible = visible_rows(&heights, viewport.min.y, viewport.max.y);
         ui.add_space(visible.before);
         let mut measured = Vec::with_capacity(visible.rows.len());
         for &row in &rows[visible.rows.clone()] {
             let top = ui.cursor().top();
-            draw_row(ui, row, runs, markdown, &mut view.show_all);
+            draw_row(ui, row, runs, markdown, &mut view.cards);
             let height = ui.cursor().top() - top;
             view.heights.insert(row, height);
             measured.push(height);
@@ -165,7 +229,7 @@ fn draw_row(
     row: Row,
     runs: &[Run],
     markdown: &mut CommonMarkCache,
-    show_all: &mut HashSet<ItemKey>,
+    cards: &mut Cards,
 ) {
     match row {
         Row::Separator(_) => {
@@ -179,7 +243,7 @@ fn draw_row(
                 run,
                 trajectory: &runs[run].trajectory,
             };
-            items.show(ui, id, markdown, show_all);
+            items.show(ui, id, markdown, cards);
         }
         Row::Error(run) => {
             if let Some(error) = &runs[run].error {
@@ -249,19 +313,28 @@ impl Items<'_> {
         ui: &mut egui::Ui,
         id: NodeId,
         markdown: &mut CommonMarkCache,
-        show_all: &mut HashSet<ItemKey>,
+        cards: &mut Cards,
     ) {
         let key = (self.run, id);
-        ui.push_id(key, |ui| {
-            if self.trajectory.is_orphan(id) {
-                ui.label(
-                    egui::RichText::new("⚠ orphan: its parent call is unknown")
-                        .small()
-                        .weak(),
-                );
+        let response = ui
+            .push_id(key, |ui| {
+                if self.trajectory.is_orphan(id) {
+                    ui.label(
+                        egui::RichText::new("⚠ orphan: its parent call is unknown")
+                            .small()
+                            .weak(),
+                    );
+                }
+                self.item(ui, key, markdown, cards);
+            })
+            .response;
+        if cards.reveal == Some(key) {
+            if ui.clip_rect().y_range().contains(response.rect.top()) {
+                cards.reveal = None;
+            } else {
+                ui.scroll_to_rect(response.rect, Some(egui::Align::TOP));
             }
-            self.item(ui, key, markdown, show_all);
-        });
+        }
     }
 
     fn item(
@@ -269,7 +342,7 @@ impl Items<'_> {
         ui: &mut egui::Ui,
         key: ItemKey,
         markdown: &mut CommonMarkCache,
-        show_all: &mut HashSet<ItemKey>,
+        cards: &mut Cards,
     ) {
         match &self.trajectory.nodes[key.1] {
             Node::Text(text) => {
@@ -284,9 +357,9 @@ impl Items<'_> {
                     .show(ui, |ui| ui.label(egui::RichText::new(text).weak()));
             }
             Node::Tool(tool) if tool.is_subagent() || !tool.children.is_empty() => {
-                self.subagent_card(ui, key, tool, markdown, show_all)
+                self.subagent_card(ui, key, tool, markdown, cards)
             }
-            Node::Tool(tool) => tool_card(ui, key, tool, show_all),
+            Node::Tool(tool) => tool_card(ui, key, tool, cards),
             Node::System(line) => {
                 ui.label(egui::RichText::new(line).small().weak());
             }
@@ -300,20 +373,21 @@ impl Items<'_> {
         key: ItemKey,
         tool: &Tool,
         markdown: &mut CommonMarkCache,
-        show_all: &mut HashSet<ItemKey>,
+        cards: &mut Cards,
     ) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        card_frame(ui, key, cards).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::CollapsingHeader::new(subagent_header(ui, tool))
                 .id_salt("subagent")
                 .default_open(false)
+                .open(cards.open.remove(&key).then_some(true))
                 .show(ui, |ui| {
                     for &child in &tool.children {
-                        self.show(ui, child, markdown, show_all);
+                        self.show(ui, child, markdown, cards);
                     }
                 });
             if let Some(result) = &tool.result {
-                tool_result(ui, key, result, show_all);
+                tool_result(ui, key, result, cards);
             }
         });
     }
@@ -349,8 +423,20 @@ fn subagent_label(tool: &Tool) -> String {
     }
 }
 
-fn tool_card(ui: &mut egui::Ui, key: ItemKey, tool: &Tool, show_all: &mut HashSet<ItemKey>) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
+fn card_frame(ui: &egui::Ui, key: ItemKey, cards: &Cards) -> egui::Frame {
+    let frame = egui::Frame::group(ui.style());
+    match cards.highlight_left(key, ui.input(|i| i.time)) {
+        Some(left) => {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+            frame.stroke(ui.visuals().selection.stroke)
+        }
+        None => frame,
+    }
+}
+
+fn tool_card(ui: &mut egui::Ui, key: ItemKey, tool: &Tool, cards: &mut Cards) {
+    card_frame(ui, key, cards).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             status_icon(ui, tool.status);
@@ -360,17 +446,12 @@ fn tool_card(ui: &mut egui::Ui, key: ItemKey, tool: &Tool, show_all: &mut HashSe
             );
         });
         if let Some(result) = &tool.result {
-            tool_result(ui, key, result, show_all);
+            tool_result(ui, key, result, cards);
         }
     });
 }
 
-fn tool_result(
-    ui: &mut egui::Ui,
-    key: ItemKey,
-    result: &ToolResult,
-    show_all: &mut HashSet<ItemKey>,
-) {
+fn tool_result(ui: &mut egui::Ui, key: ItemKey, result: &ToolResult, cards: &mut Cards) {
     let kind = if result.is_error { "Error" } else { "Output" };
     let amount = match (&result.saved, result.line_count) {
         (Some(saved), _) => format!("{} · preview", saved.size),
@@ -381,12 +462,12 @@ fn tool_result(
         .id_salt("result")
         .default_open(false)
         .show(ui, |ui| {
-            let (text, button) = result.expanded(show_all.contains(&key));
+            let (text, button) = result.expanded(cards.show_all.contains(&key));
             ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
             if let Some(count) = button
                 && ui.button(format!("Show all {count} lines")).clicked()
             {
-                show_all.insert(key);
+                cards.show_all.insert(key);
             }
         });
     if let Some(saved) = &result.saved {
@@ -407,7 +488,7 @@ fn tool_result(
     }
 }
 
-fn status_icon(ui: &mut egui::Ui, status: ToolStatus) {
+pub(crate) fn status_icon(ui: &mut egui::Ui, status: ToolStatus) {
     match status_glyph(ui.visuals(), status) {
         Some((glyph, color)) => {
             ui.label(egui::RichText::new(glyph).color(color));
@@ -563,6 +644,63 @@ mod tests {
             0.0
         );
         assert_eq!(anchor_shift(0.0, &[], &[], 50.0), 0.0);
+    }
+
+    fn subagents_run() -> Run {
+        let mut run = Run::new("go");
+        for line in include_str!("../tests/fixtures/subagents.jsonl").lines() {
+            run.trajectory.push(&crate::event::parse_line(line));
+        }
+        run
+    }
+
+    fn tool_id(run: &Run, name: &str) -> NodeId {
+        run.trajectory
+            .nodes
+            .iter()
+            .position(|n| matches!(n, Node::Tool(t) if t.name == name))
+            .unwrap()
+    }
+
+    #[test]
+    fn revealing_a_nested_call_scrolls_to_its_root_and_opens_its_cards() {
+        let runs = [subagents_run()];
+        let (agent, read) = (tool_id(&runs[0], "Agent"), tool_id(&runs[0], "Read"));
+        assert_eq!(
+            plan_reveal(&runs, Target::Call(0, read)),
+            Reveal {
+                row: Row::Item((0, agent)),
+                open: vec![(0, agent)],
+                item: Some((0, read)),
+            }
+        );
+    }
+
+    #[test]
+    fn revealing_a_top_level_call_or_a_run_opens_nothing() {
+        let runs = [subagents_run()];
+        let agent = tool_id(&runs[0], "Agent");
+        let plan = plan_reveal(&runs, Target::Call(0, agent));
+        assert_eq!((plan.row, plan.open), (Row::Item((0, agent)), vec![]));
+        assert_eq!(
+            plan_reveal(&runs, Target::Run(0)),
+            Reveal {
+                row: Row::Prompt(0),
+                open: vec![],
+                item: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_highlight_lasts_one_second_on_its_own_card() {
+        let mut view = View::default();
+        let runs = [subagents_run()];
+        let read = tool_id(&runs[0], "Read");
+        view.reveal(&runs, Target::Call(0, read), 10.0);
+        assert_eq!(view.cards.highlight_left((0, read), 10.25), Some(0.75));
+        assert_eq!(view.cards.highlight_left((0, read), 11.0), None);
+        assert_eq!(view.cards.highlight_left((0, 0), 10.25), None);
     }
 
     #[test]
