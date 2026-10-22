@@ -6,7 +6,7 @@ use eframe::egui;
 use egui_commonmark::CommonMarkCache;
 
 use crate::run::{Run, RunStatus};
-use crate::runner::{self, RunMsg};
+use crate::runner::{self, RunMsg, Stopper};
 use crate::transcript::{self, View};
 
 pub struct App {
@@ -15,6 +15,7 @@ pub struct App {
     prompt: String,
     run: Option<Run>,
     events: Option<Receiver<RunMsg>>,
+    stopper: Option<Stopper>,
     markdown: CommonMarkCache,
     view: View,
 }
@@ -27,6 +28,7 @@ impl App {
             prompt: String::new(),
             run: None,
             events: None,
+            stopper: None,
             markdown: CommonMarkCache::default(),
             view: View::default(),
         }
@@ -47,6 +49,7 @@ impl App {
         }
         if run.status != RunStatus::Running {
             self.events = None;
+            self.stopper = None;
         }
     }
 
@@ -75,8 +78,11 @@ impl App {
                         .desired_width(ui.available_width() - 70.0)
                         .hint_text("Ask Claude… (Enter sends, Shift+Enter adds a line)"),
                 );
-                let button = ui.add_enabled(!self.is_running(), egui::Button::new("Send"));
-                if enter || button.clicked() {
+                if self.is_running() {
+                    if ui.button("⏹ Stop").clicked() {
+                        self.stop();
+                    }
+                } else if enter || ui.button("Send").clicked() {
                     self.send(ui.ctx());
                 }
             });
@@ -96,14 +102,24 @@ impl App {
         let cmd = runner::claude_command(&self.claude, &prompt, &self.dir);
         let ctx = ctx.clone();
         match runner::start(cmd, move || ctx.request_repaint()) {
-            Ok(events) => {
+            Ok(handle) => {
                 self.run = Some(Run::new(&prompt));
-                self.events = Some(events);
+                self.events = Some(handle.events);
+                self.stopper = Some(handle.stopper);
             }
             Err(error) => self.run = Some(Run::failed_to_start(&prompt, error)),
         }
         self.prompt.clear();
         self.view = View::default();
+    }
+}
+
+impl App {
+    fn stop(&mut self) {
+        if let (Some(stopper), Some(run)) = (&self.stopper, &mut self.run) {
+            run.request_stop();
+            stopper.stop();
+        }
     }
 }
 
@@ -128,6 +144,7 @@ fn status_badge(ui: &mut egui::Ui, status: RunStatus) {
         RunStatus::Running => ("⏺ running", visuals.warn_fg_color),
         RunStatus::Done => ("✔ done", transcript::OK_GREEN),
         RunStatus::Failed => ("✖ failed", visuals.error_fg_color),
+        RunStatus::Stopped => ("⏹ stopped", visuals.weak_text_color()),
     };
     ui.label(egui::RichText::new(text).color(color).strong());
 }

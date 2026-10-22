@@ -1,13 +1,16 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
 
 use crate::event::{Event, parse_line};
 
 const STDERR_LINES: usize = 200;
+const KILL_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum RunMsg {
@@ -16,6 +19,34 @@ pub enum RunMsg {
         code: Option<i32>,
         stderr: Vec<String>,
     },
+}
+
+#[derive(Debug)]
+pub struct RunHandle {
+    pub events: Receiver<RunMsg>,
+    pub stopper: Stopper,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Stopper {
+    process_group: i32,
+}
+
+impl Stopper {
+    pub fn stop(&self) {
+        let group = self.process_group;
+        signal_group(group, libc::SIGTERM);
+        thread::spawn(move || {
+            thread::sleep(KILL_AFTER);
+            signal_group(group, libc::SIGKILL);
+        });
+    }
+}
+
+fn signal_group(process_group: i32, signal: libc::c_int) {
+    unsafe {
+        libc::kill(-process_group, signal);
+    }
 }
 
 pub fn build_args(prompt: &str) -> Vec<String> {
@@ -38,11 +69,9 @@ pub fn claude_command(program: &str, prompt: &str, cwd: &Path) -> Command {
     cmd
 }
 
-pub fn start(
-    mut cmd: Command,
-    notify: impl Fn() + Send + 'static,
-) -> Result<Receiver<RunMsg>, String> {
+pub fn start(mut cmd: Command, notify: impl Fn() + Send + 'static) -> Result<RunHandle, String> {
     let mut child = cmd
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -51,6 +80,9 @@ pub fn start(
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let stderr_tail = thread::spawn(move || tail_lines(stderr, STDERR_LINES));
+    let stopper = Stopper {
+        process_group: child.id() as i32,
+    };
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -70,7 +102,10 @@ pub fn start(
         let _ = tx.send(RunMsg::Exited { code, stderr });
         notify();
     });
-    Ok(rx)
+    Ok(RunHandle {
+        events: rx,
+        stopper,
+    })
 }
 
 fn spawn_error(cmd: &Command, error: io::Error) -> String {

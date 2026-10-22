@@ -7,6 +7,7 @@ pub enum RunStatus {
     Running,
     Done,
     Failed,
+    Stopped,
 }
 
 #[derive(Debug)]
@@ -16,6 +17,7 @@ pub struct Run {
     pub status: RunStatus,
     pub error: Option<String>,
     result_is_error: Option<bool>,
+    stop_requested: bool,
 }
 
 impl Run {
@@ -26,6 +28,7 @@ impl Run {
             status: RunStatus::Running,
             error: None,
             result_is_error: None,
+            stop_requested: false,
         }
     }
 
@@ -37,6 +40,10 @@ impl Run {
         }
     }
 
+    pub fn request_stop(&mut self) {
+        self.stop_requested = true;
+    }
+
     pub fn apply(&mut self, msg: RunMsg) {
         match msg {
             RunMsg::Event(event) => {
@@ -46,7 +53,11 @@ impl Run {
                 self.trajectory.push(&event);
             }
             RunMsg::Exited { code, stderr } => {
-                self.status = final_status(self.result_is_error, code);
+                self.status = if self.stop_requested {
+                    RunStatus::Stopped
+                } else {
+                    final_status(self.result_is_error, code)
+                };
                 self.trajectory.interrupt_open_tools();
                 if self.status == RunStatus::Failed && !stderr.is_empty() {
                     self.error = Some(stderr.join("\n"));
@@ -120,6 +131,18 @@ mod tests {
     #[test]
     fn a_signal_is_failed_even_after_a_successful_result() {
         assert_eq!(finished(&[OK_RESULT], None, &[]).status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn a_run_asked_to_stop_ends_as_stopped() {
+        let mut run = Run::new("hi");
+        run.request_stop();
+        run.apply(RunMsg::Exited {
+            code: None,
+            stderr: vec!["Terminated".into()],
+        });
+        assert_eq!(run.status, RunStatus::Stopped);
+        assert_eq!(run.error, None);
     }
 
     #[test]
