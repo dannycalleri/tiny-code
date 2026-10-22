@@ -10,12 +10,20 @@ pub enum RunStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunStats {
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<u64>,
+    pub turns: Option<u32>,
+}
+
 #[derive(Debug)]
 pub struct Run {
     pub prompt: String,
     pub trajectory: Trajectory,
     pub status: RunStatus,
     pub error: Option<String>,
+    pub stats: Option<RunStats>,
     result_is_error: Option<bool>,
     stop_requested: bool,
 }
@@ -27,6 +35,7 @@ impl Run {
             trajectory: Trajectory::default(),
             status: RunStatus::Running,
             error: None,
+            stats: None,
             result_is_error: None,
             stop_requested: false,
         }
@@ -49,6 +58,11 @@ impl Run {
             RunMsg::Event(event) => {
                 if let Event::Result(result) = &event {
                     self.result_is_error = Some(result.is_error);
+                    self.stats = Some(RunStats {
+                        cost_usd: result.total_cost_usd,
+                        duration_ms: result.duration_ms,
+                        turns: result.num_turns,
+                    });
                 }
                 self.trajectory.push(&event);
             }
@@ -95,6 +109,22 @@ mod tests {
     const OK_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false}"#;
     const ERROR_RESULT: &str =
         r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
+
+    #[test]
+    fn stats_come_from_the_result_event() {
+        let hello: Vec<&str> = include_str!("../tests/fixtures/hello.jsonl")
+            .lines()
+            .collect();
+        let run = finished(&hello, Some(0), &[]);
+        let stats = run.stats.unwrap();
+        assert_eq!((stats.duration_ms, stats.turns), (Some(2771), Some(1)));
+        assert!((stats.cost_usd.unwrap() - 0.1938238).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_run_without_a_result_has_no_stats() {
+        assert_eq!(finished(&[], Some(0), &[]).stats, None);
+    }
 
     #[test]
     fn a_new_run_is_running() {
