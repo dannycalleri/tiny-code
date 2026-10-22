@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -14,6 +15,36 @@ type ItemKey = (usize, NodeId);
 pub struct View {
     jump: bool,
     show_all: HashSet<ItemKey>,
+    heights: HashMap<Row, f32>,
+    scroll_to: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Row {
+    Separator(usize),
+    Prompt(usize),
+    Item(ItemKey),
+    Error(usize),
+}
+
+fn rows(runs: &[Run]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        if index > 0 {
+            rows.push(Row::Separator(index));
+        }
+        rows.push(Row::Prompt(index));
+        rows.extend(
+            run.trajectory
+                .roots
+                .iter()
+                .map(|&id| Row::Item((index, id))),
+        );
+        if run.error.is_some() {
+            rows.push(Row::Error(index));
+        }
+    }
+    rows
 }
 
 impl View {
@@ -24,32 +55,47 @@ impl View {
 
 pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, view: &mut View) {
     let jump = std::mem::take(&mut view.jump);
-    let output = egui::ScrollArea::vertical()
+    let rows = rows(runs);
+    let mut area = egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for (index, run) in runs.iter().enumerate() {
-                if index > 0 {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-                }
-                prompt_bubble(ui, &run.prompt);
-                for &id in &run.trajectory.roots {
-                    let items = Items {
-                        run: index,
-                        trajectory: &run.trajectory,
-                    };
-                    items.show(ui, id, markdown, &mut view.show_all);
-                }
-                if let Some(error) = &run.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-            }
-            if jump {
-                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-            }
-        });
+        .stick_to_bottom(true);
+    if let Some(offset) = view.scroll_to.take() {
+        area = area.vertical_scroll_offset(offset);
+    }
+    let output = area.show_viewport(ui, |ui, viewport| {
+        let known: Vec<Option<f32>> = rows
+            .iter()
+            .map(|row| view.heights.get(row).copied())
+            .collect();
+        let heights: Vec<f32> = known
+            .iter()
+            .map(|h| h.unwrap_or(ESTIMATED_ROW_HEIGHT))
+            .collect();
+        let visible = visible_rows(&heights, viewport.min.y, viewport.max.y);
+        ui.add_space(visible.before);
+        let mut measured = Vec::with_capacity(visible.rows.len());
+        for &row in &rows[visible.rows.clone()] {
+            let top = ui.cursor().top();
+            draw_row(ui, row, runs, markdown, &mut view.show_all);
+            let height = ui.cursor().top() - top;
+            view.heights.insert(row, height);
+            measured.push(height);
+        }
+        ui.add_space(visible.after);
+        if jump {
+            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+        }
+        anchor_shift(
+            visible.before,
+            &known[visible.rows],
+            &measured,
+            viewport.min.y,
+        )
+    });
+    if output.inner != 0.0 && !jump {
+        view.scroll_to = Some(output.state.clamped_offset().y + output.inner);
+        ui.ctx().request_repaint();
+    }
 
     let viewport = output.inner_rect.height();
     if !is_at_bottom(
@@ -65,6 +111,80 @@ pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, vie
         if ui.put(at, egui::Button::new("⬇ Jump to latest")).clicked() {
             view.jump = true;
             ui.ctx().request_repaint();
+        }
+    }
+}
+
+const ESTIMATED_ROW_HEIGHT: f32 = 40.0;
+
+#[derive(Debug, PartialEq)]
+struct Visible {
+    rows: Range<usize>,
+    before: f32,
+    after: f32,
+}
+
+fn visible_rows(heights: &[f32], top: f32, bottom: f32) -> Visible {
+    let total: f32 = heights.iter().sum();
+    let mut start = 0;
+    let mut y = 0.0;
+    while start + 1 < heights.len() && y + heights[start] <= top {
+        y += heights[start];
+        start += 1;
+    }
+    let before = y;
+    let mut end = start;
+    while end < heights.len() && (end == start || y < bottom) {
+        y += heights[end];
+        end += 1;
+    }
+    Visible {
+        rows: start..end,
+        before,
+        after: total - y,
+    }
+}
+
+fn anchor_shift(before: f32, known: &[Option<f32>], measured: &[f32], viewport_top: f32) -> f32 {
+    let mut top = before;
+    let mut shift = 0.0;
+    for (old, new) in known.iter().zip(measured) {
+        if top >= viewport_top {
+            break;
+        }
+        if old.is_none() {
+            shift += new - ESTIMATED_ROW_HEIGHT;
+        }
+        top += new;
+    }
+    shift
+}
+
+fn draw_row(
+    ui: &mut egui::Ui,
+    row: Row,
+    runs: &[Run],
+    markdown: &mut CommonMarkCache,
+    show_all: &mut HashSet<ItemKey>,
+) {
+    match row {
+        Row::Separator(_) => {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+        }
+        Row::Prompt(run) => prompt_bubble(ui, &runs[run].prompt),
+        Row::Item((run, id)) => {
+            let items = Items {
+                run,
+                trajectory: &runs[run].trajectory,
+            };
+            items.show(ui, id, markdown, show_all);
+        }
+        Row::Error(run) => {
+            if let Some(error) = &runs[run].error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
         }
     }
 }
@@ -386,6 +506,82 @@ mod tests {
             "Agent · Find TODOs · 1 step"
         );
         assert_eq!(subagent_label(&agent("", 0)), "Agent · 0 steps");
+    }
+
+    fn visible(heights: &[f32], top: f32, bottom: f32) -> (Range<usize>, f32, f32) {
+        let v = visible_rows(heights, top, bottom);
+        (v.rows, v.before, v.after)
+    }
+
+    #[test]
+    fn rows_above_and_below_the_viewport_are_replaced_by_space() {
+        let heights = [10.0, 20.0, 30.0, 40.0, 50.0];
+        assert_eq!(visible(&heights, 30.0, 70.0), (2..4, 30.0, 50.0));
+    }
+
+    #[test]
+    fn a_row_cut_by_the_viewport_edge_is_drawn() {
+        let heights = [10.0, 20.0, 30.0, 40.0, 50.0];
+        assert_eq!(visible(&heights, 29.0, 61.0), (1..4, 10.0, 50.0));
+    }
+
+    #[test]
+    fn the_top_of_the_list_starts_with_no_space() {
+        assert_eq!(visible(&[10.0, 10.0, 10.0], 0.0, 15.0), (0..2, 0.0, 10.0));
+    }
+
+    #[test]
+    fn an_offset_past_the_end_still_draws_the_last_row() {
+        assert_eq!(visible(&[10.0, 10.0], 500.0, 600.0), (1..2, 10.0, 0.0));
+    }
+
+    #[test]
+    fn no_rows_draw_nothing() {
+        assert_eq!(visible(&[], 0.0, 100.0), (0..0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_row_cut_by_the_top_that_grows_shifts_the_scroll_by_its_growth() {
+        assert_eq!(
+            anchor_shift(100.0, &[None, None], &[200.0, 60.0], 120.0),
+            160.0
+        );
+    }
+
+    #[test]
+    fn a_measured_row_that_grows_at_the_top_does_not_shift_the_scroll() {
+        assert_eq!(
+            anchor_shift(100.0, &[Some(80.0), None], &[200.0, 60.0], 120.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn rows_starting_inside_the_viewport_do_not_shift_the_scroll() {
+        assert_eq!(
+            anchor_shift(100.0, &[None, None], &[200.0, 60.0], 100.0),
+            0.0
+        );
+        assert_eq!(anchor_shift(0.0, &[], &[], 50.0), 0.0);
+    }
+
+    #[test]
+    fn rows_put_each_run_between_a_separator_and_its_error() {
+        let mut first = Run::failed_to_start("one", "no claude".into());
+        first.trajectory.push(&crate::event::parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        ));
+        let second = Run::new("two");
+        assert_eq!(
+            rows(&[first, second]),
+            [
+                Row::Prompt(0),
+                Row::Item((0, 0)),
+                Row::Error(0),
+                Row::Separator(1),
+                Row::Prompt(1)
+            ]
+        );
     }
 
     #[test]
