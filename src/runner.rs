@@ -49,8 +49,8 @@ fn signal_group(process_group: i32, signal: libc::c_int) {
     }
 }
 
-pub fn build_args(prompt: &str) -> Vec<String> {
-    [
+pub fn build_args(prompt: &str, session_id: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
         "-p",
         prompt,
         "--output-format",
@@ -60,12 +60,21 @@ pub fn build_args(prompt: &str) -> Vec<String> {
         "auto",
     ]
     .map(String::from)
-    .to_vec()
+    .to_vec();
+    if let Some(id) = session_id {
+        args.extend(["--resume".to_string(), id.to_string()]);
+    }
+    args
 }
 
-pub fn claude_command(program: &str, prompt: &str, cwd: &Path) -> Command {
+pub fn claude_command(
+    program: &str,
+    prompt: &str,
+    session_id: Option<&str>,
+    cwd: &Path,
+) -> Command {
     let mut cmd = Command::new(program);
-    cmd.args(build_args(prompt)).current_dir(cwd);
+    cmd.args(build_args(prompt, session_id)).current_dir(cwd);
     cmd
 }
 
@@ -142,7 +151,7 @@ mod tests {
     #[test]
     fn build_args_puts_the_prompt_after_p_and_streams_json() {
         assert_eq!(
-            build_args("hi there"),
+            build_args("hi there", None),
             [
                 "-p",
                 "hi there",
@@ -157,11 +166,17 @@ mod tests {
 
     #[test]
     fn claude_command_runs_in_the_session_directory_with_the_built_args() {
-        let cmd = claude_command("claude", "hi", Path::new("/some/dir"));
+        let cmd = claude_command("claude", "hi", Some("abc"), Path::new("/some/dir"));
         assert_eq!(cmd.get_program(), "claude");
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/some/dir")));
         let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, build_args("hi"));
+        assert_eq!(args, build_args("hi", Some("abc")));
+    }
+
+    #[test]
+    fn build_args_resumes_a_known_session() {
+        let args = build_args("next", Some("abc"));
+        assert_eq!(args[args.len() - 2..], ["--resume", "abc"]);
     }
 
     #[test]

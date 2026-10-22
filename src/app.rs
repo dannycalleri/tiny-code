@@ -7,13 +7,14 @@ use egui_commonmark::CommonMarkCache;
 
 use crate::run::{Run, RunStatus};
 use crate::runner::{self, RunMsg, Stopper};
+use crate::session::Session;
 use crate::transcript::{self, View};
 
 pub struct App {
     dir: PathBuf,
     claude: String,
     prompt: String,
-    run: Option<Run>,
+    session: Session,
     events: Option<Receiver<RunMsg>>,
     stopper: Option<Stopper>,
     markdown: CommonMarkCache,
@@ -26,7 +27,7 @@ impl App {
             dir,
             claude,
             prompt: String::new(),
-            run: None,
+            session: Session::default(),
             events: None,
             stopper: None,
             markdown: CommonMarkCache::default(),
@@ -35,19 +36,15 @@ impl App {
     }
 
     pub fn is_running(&self) -> bool {
-        self.run
-            .as_ref()
-            .is_some_and(|r| r.status == RunStatus::Running)
+        self.session.is_running()
     }
 
     pub fn poll(&mut self) {
-        let (Some(events), Some(run)) = (&self.events, &mut self.run) else {
-            return;
-        };
+        let Some(events) = &self.events else { return };
         while let Ok(msg) = events.try_recv() {
-            run.apply(msg);
+            self.session.apply(msg);
         }
-        if run.status != RunStatus::Running {
+        if !self.session.is_running() {
             self.events = None;
             self.stopper = None;
         }
@@ -60,14 +57,19 @@ impl App {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.dir.display().to_string());
-                if let Some(run) = &self.run {
+                if let Some(run) = &self.session.current {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         status_badge(ui, run.status);
                     });
                 }
             });
         });
-        if let Some(run) = self.run.as_ref().filter(|r| r.status != RunStatus::Running) {
+        if let Some(run) = self
+            .session
+            .current
+            .as_ref()
+            .filter(|r| r.status != RunStatus::Running)
+        {
             egui::Panel::bottom("footer").show(ui, |ui| {
                 let line = transcript::stats_line(run.stats.as_ref());
                 ui.label(
@@ -98,26 +100,27 @@ impl App {
             });
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(run) = &self.run {
+            if let Some(run) = &self.session.current {
                 transcript::show(ui, run, &mut self.markdown, &mut self.view);
             }
         });
     }
 
     fn send(&mut self, ctx: &egui::Context) {
-        let prompt = self.prompt.trim().to_string();
-        if prompt.is_empty() || self.is_running() {
+        if !self.session.can_send(&self.prompt) {
             return;
         }
-        let cmd = runner::claude_command(&self.claude, &prompt, &self.dir);
+        let prompt = self.prompt.trim().to_string();
+        let cmd =
+            runner::claude_command(&self.claude, &prompt, self.session.session_id(), &self.dir);
         let ctx = ctx.clone();
         match runner::start(cmd, move || ctx.request_repaint()) {
             Ok(handle) => {
-                self.run = Some(Run::new(&prompt));
+                self.session.begin(Run::new(&prompt));
                 self.events = Some(handle.events);
                 self.stopper = Some(handle.stopper);
             }
-            Err(error) => self.run = Some(Run::failed_to_start(&prompt, error)),
+            Err(error) => self.session.begin(Run::failed_to_start(&prompt, error)),
         }
         self.prompt.clear();
         self.view = View::default();
@@ -126,7 +129,7 @@ impl App {
 
 impl App {
     fn stop(&mut self) {
-        if let (Some(stopper), Some(run)) = (&self.stopper, &mut self.run) {
+        if let (Some(stopper), Some(run)) = (&self.stopper, &mut self.session.current) {
             run.request_stop();
             stopper.stop();
         }

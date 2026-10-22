@@ -24,6 +24,7 @@ pub struct Run {
     pub status: RunStatus,
     pub error: Option<String>,
     pub stats: Option<RunStats>,
+    pub session_id: Option<String>,
     result_is_error: Option<bool>,
     stop_requested: bool,
 }
@@ -36,6 +37,7 @@ impl Run {
             status: RunStatus::Running,
             error: None,
             stats: None,
+            session_id: None,
             result_is_error: None,
             stop_requested: false,
         }
@@ -56,6 +58,14 @@ impl Run {
     pub fn apply(&mut self, msg: RunMsg) {
         match msg {
             RunMsg::Event(event) => {
+                let session_id = match &event {
+                    Event::System(s) => s.session_id.as_ref(),
+                    Event::Result(r) => r.session_id.as_ref(),
+                    _ => None,
+                };
+                if let Some(id) = session_id {
+                    self.session_id = Some(id.clone());
+                }
                 if let Event::Result(result) = &event {
                     self.result_is_error = Some(result.is_error);
                     self.stats = Some(RunStats {

@@ -78,7 +78,7 @@ fn missing_binary_is_reported_as_not_on_path() {
 
 #[test]
 fn missing_working_directory_is_not_reported_as_missing_binary() {
-    let cmd = claude_command("sh", "hi", Path::new("/no/such/turbo-harness/dir"));
+    let cmd = claude_command("sh", "hi", None, Path::new("/no/such/turbo-harness/dir"));
     let err = start(cmd, || {}).unwrap_err();
     assert_eq!(
         err,
