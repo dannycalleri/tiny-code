@@ -154,6 +154,17 @@ impl Trajectory {
         }
     }
 
+    pub fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
+        let mut ancestors = Vec::new();
+        let mut at = self.parents[id];
+        while let Some(parent) = at {
+            ancestors.push(parent);
+            at = self.parents[parent];
+        }
+        ancestors.reverse();
+        ancestors
+    }
+
     pub fn is_orphan(&self, id: NodeId) -> bool {
         self.orphans.contains(&id)
     }
@@ -734,6 +745,23 @@ mod tests {
         assert_eq!(names(&t, &t.roots), ["Bash", "Read"]);
         assert!(!t.is_orphan(t.roots[0]));
         assert!(t.is_orphan(t.roots[1]));
+    }
+
+    #[test]
+    fn ancestors_go_from_the_outer_card_to_the_inner_one() {
+        let t = trajectory(
+            &[
+                call(None, "outer", "Agent"),
+                call(Some("outer"), "inner", "Agent"),
+                call(Some("inner"), "grep", "Grep"),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(
+            t.ancestors(t.tools["grep"]),
+            [t.tools["outer"], t.tools["inner"]]
+        );
+        assert!(t.ancestors(t.tools["outer"]).is_empty());
     }
 
     #[test]

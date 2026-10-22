@@ -1,5 +1,6 @@
 pub mod app;
 pub mod event;
+pub mod outline;
 pub mod run;
 pub mod runner;
 pub mod session;
