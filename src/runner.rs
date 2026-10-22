@@ -3,11 +3,14 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
 use crate::event::{Event, parse_line};
+use crate::store::{self, LogWriter};
 
 const STDERR_LINES: usize = 200;
 const KILL_AFTER: Duration = Duration::from_secs(2);
@@ -27,13 +30,15 @@ pub struct RunHandle {
     pub stopper: Stopper,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Stopper {
     process_group: i32,
+    requested: Arc<AtomicBool>,
 }
 
 impl Stopper {
     pub fn stop(&self) {
+        self.requested.store(true, Ordering::Relaxed);
         let group = self.process_group;
         signal_group(group, libc::SIGTERM);
         thread::spawn(move || {
@@ -78,7 +83,11 @@ pub fn claude_command(
     cmd
 }
 
-pub fn start(mut cmd: Command, notify: impl Fn() + Send + 'static) -> Result<RunHandle, String> {
+pub fn start(
+    mut cmd: Command,
+    mut log: Option<LogWriter>,
+    notify: impl Fn() + Send + 'static,
+) -> Result<RunHandle, String> {
     let mut child = cmd
         .process_group(0)
         .stdin(Stdio::null())
@@ -91,7 +100,9 @@ pub fn start(mut cmd: Command, notify: impl Fn() + Send + 'static) -> Result<Run
     let stderr_tail = thread::spawn(move || tail_lines(stderr, STDERR_LINES));
     let stopper = Stopper {
         process_group: child.id() as i32,
+        requested: Arc::default(),
     };
+    let stop_requested = Arc::clone(&stopper.requested);
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -101,13 +112,27 @@ pub fn start(mut cmd: Command, notify: impl Fn() + Send + 'static) -> Result<Run
             if line.trim().is_empty() {
                 continue;
             }
-            if tx.send(RunMsg::Event(parse_line(&line))).is_err() {
+            let event = parse_line(&line);
+            if let Some(log) = &mut log {
+                if let Event::System(system) = &event
+                    && let Some(id) = &system.session_id
+                    && !log.has_session()
+                {
+                    log.set_session(id);
+                }
+                log.write(&line);
+            }
+            if tx.send(RunMsg::Event(event)).is_err() {
                 break;
             }
             notify();
         }
         let code = child.wait().ok().and_then(|status| status.code());
         let stderr = stderr_tail.join().unwrap_or_default();
+        if let Some(log) = &mut log {
+            let stopped = stop_requested.load(Ordering::Relaxed);
+            log.write(&store::exit_line(code, &stderr, stopped));
+        }
         let _ = tx.send(RunMsg::Exited { code, stderr });
         notify();
     });

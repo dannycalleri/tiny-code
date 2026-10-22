@@ -6,6 +6,7 @@ use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use turbo_harness::app::App;
+use turbo_harness::store::Store;
 
 fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -31,7 +32,9 @@ fn harness(claude: PathBuf) -> Harness<'static, App> {
 }
 
 fn harness_sized(claude: PathBuf, size: [f32; 2]) -> Harness<'static, App> {
-    let app = App::new(std::env::temp_dir(), claude.display().to_string());
+    let _ = std::fs::remove_dir_all(claude.with_extension("store"));
+    let store = Store::open(&claude.with_extension("store"), &std::env::temp_dir());
+    let app = App::new(std::env::temp_dir(), claude.display().to_string(), store);
     Harness::builder()
         .with_size(size)
         .with_max_steps(16)
@@ -84,6 +87,19 @@ fn a_run_shows_markdown_and_a_card_per_tool_call() {
     harness.get_by_label("Last run: $0.23 · 9.4 s · 4 turns");
     assert_eq!(harness.get_all_by_label("✔").count(), 2);
     harness.get_by_label("✖");
+
+    let index = Store::open(&claude.with_extension("store"), &std::env::temp_dir()).index();
+    let [entry] = &index[..] else {
+        panic!("{index:?}")
+    };
+    assert_eq!(
+        (
+            entry.title.as_str(),
+            format!("{:.4}", entry.cost_usd.unwrap()),
+            entry.status.as_str()
+        ),
+        ("Read notes.txt", "0.2279".to_string(), "done")
+    );
     let _ = std::fs::remove_file(claude);
 }
 

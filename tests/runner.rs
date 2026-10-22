@@ -7,6 +7,7 @@ use turbo_harness::event::{Event, parse_line};
 use turbo_harness::run::{Run, RunStatus};
 use turbo_harness::runner::{RunMsg, claude_command, start};
 use turbo_harness::session::Session;
+use turbo_harness::store::{self, Store};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -32,13 +33,19 @@ fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("turbo-harness-{}-{name}", std::process::id()))
 }
 
+fn temp_store(name: &str) -> Store {
+    let root = temp_path(&format!("store-{name}"));
+    let _ = std::fs::remove_dir_all(&root);
+    Store::open(&root, Path::new("/home/user/demo"))
+}
+
 #[test]
 fn first_event_arrives_while_the_process_still_runs() {
     let gate = temp_path("gate");
     let _ = std::fs::remove_file(&gate);
     let mut cmd = fake_claude("hello.jsonl");
     cmd.env("FAKE_GATE", &gate);
-    let rx = start(cmd, || {}).unwrap().events;
+    let rx = start(cmd, None, || {}).unwrap().events;
 
     let RunMsg::Event(first) = rx
         .recv_timeout(TIMEOUT)
@@ -64,7 +71,7 @@ fn first_event_arrives_while_the_process_still_runs() {
 fn non_zero_exit_reports_the_code_and_stderr() {
     let mut cmd = fake_claude("hello.jsonl");
     cmd.env("FAKE_EXIT", "3").env("FAKE_STDERR", "API error");
-    let rx = start(cmd, || {}).unwrap().events;
+    let rx = start(cmd, None, || {}).unwrap().events;
 
     let (_, code, stderr) = collect(&rx);
     assert_eq!(code, Some(3));
@@ -73,14 +80,14 @@ fn non_zero_exit_reports_the_code_and_stderr() {
 
 #[test]
 fn missing_binary_is_reported_as_not_on_path() {
-    let err = start(Command::new("claude-does-not-exist"), || {}).unwrap_err();
+    let err = start(Command::new("claude-does-not-exist"), None, || {}).unwrap_err();
     assert_eq!(err, "claude-does-not-exist was not found on PATH");
 }
 
 #[test]
 fn missing_working_directory_is_not_reported_as_missing_binary() {
     let cmd = claude_command("sh", "hi", None, Path::new("/no/such/turbo-harness/dir"));
-    let err = start(cmd, || {}).unwrap_err();
+    let err = start(cmd, None, || {}).unwrap_err();
     assert_eq!(
         err,
         "working directory /no/such/turbo-harness/dir does not exist"
@@ -99,7 +106,8 @@ fn stop_a_hanging_run(ignore_term: Option<&str>) -> Duration {
     if let Some(who) = ignore_term {
         cmd.env("FAKE_IGNORE_TERM", who);
     }
-    let handle = start(cmd, || {}).unwrap();
+    let store = temp_store(&format!("stop-{}", ignore_term.unwrap_or("none")));
+    let handle = start(cmd, Some(store.log_writer(Some("s"))), || {}).unwrap();
     let deadline = Instant::now() + TIMEOUT;
     let grandchild = loop {
         if let Some(pid) = std::fs::read_to_string(&pid_file)
@@ -136,6 +144,12 @@ fn stop_a_hanging_run(ignore_term: Option<&str>) -> Duration {
         std::thread::sleep(Duration::from_millis(10));
     }
     let _ = std::fs::remove_file(&pid_file);
+    let exit: serde_json::Value =
+        serde_json::from_str(store.read_log("s").last().unwrap()).unwrap();
+    assert_eq!(
+        (&exit["type"], &exit["stopped"]),
+        (&"turbo_exit".into(), &true.into())
+    );
     took
 }
 
@@ -172,7 +186,7 @@ fn a_follow_up_resumes_the_session_of_the_first_run() {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.jsonl"),
         )
         .env("FAKE_ARGV", &argv);
-        let handle = start(cmd, || {}).unwrap();
+        let handle = start(cmd, None, || {}).unwrap();
         session.begin(Run::new(prompt));
         while session.is_running() {
             session.apply(
@@ -190,5 +204,28 @@ fn a_follow_up_resumes_the_session_of_the_first_run() {
     assert_eq!(
         args[args.len() - 2..],
         ["--resume", "9e26b157-1db2-4ff3-99fc-8737a92f55ba"]
+    );
+}
+
+#[test]
+fn each_line_of_a_run_goes_to_the_log_of_its_session() {
+    let store = temp_store("log");
+    let mut log = store.log_writer(None);
+    log.write(&store::prompt_line("Say hello", 1));
+    let rx = start(fake_claude("hello.jsonl"), Some(log), || {})
+        .unwrap()
+        .events;
+    collect(&rx);
+
+    let mut expected = vec![store::prompt_line("Say hello", 1)];
+    expected.extend(
+        include_str!("fixtures/hello.jsonl")
+            .lines()
+            .map(String::from),
+    );
+    expected.push(store::exit_line(Some(0), &[], false));
+    assert_eq!(
+        store.read_log("9e26b157-1db2-4ff3-99fc-8737a92f55ba"),
+        expected
     );
 }

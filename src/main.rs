@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use eframe::egui;
 use turbo_harness::app::App;
+use turbo_harness::store::Store;
 
 fn main() -> eframe::Result {
     let dir = match working_dir(std::env::args_os().nth(1).map(PathBuf::from)) {
@@ -11,6 +12,11 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    let Some(data_dir) = Store::default_data_dir() else {
+        eprintln!("turbo-harness: cannot find the app data directory");
+        std::process::exit(2);
+    };
+    let store = Store::open(&data_dir, &dir);
     let claude = std::env::var("TURBO_HARNESS_CLAUDE").unwrap_or_else(|_| "claude".into());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -21,7 +27,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "turbo-harness",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new(dir, claude)))),
+        Box::new(|_cc| Ok(Box::new(App::new(dir, claude, store)))),
     )
 }
 

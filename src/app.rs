@@ -9,11 +9,13 @@ use crate::outline;
 use crate::run::{Run, RunStatus};
 use crate::runner::{self, RunMsg, Stopper};
 use crate::session::Session;
+use crate::store::{self, IndexEntry, Store};
 use crate::transcript::{self, View};
 
 pub struct App {
     dir: PathBuf,
     claude: String,
+    store: Store,
     prompt: String,
     session: Session,
     events: Option<Receiver<RunMsg>>,
@@ -24,10 +26,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(dir: PathBuf, claude: String) -> Self {
+    pub fn new(dir: PathBuf, claude: String, store: Store) -> Self {
         App {
             dir,
             claude,
+            store,
             prompt: String::new(),
             session: Session::default(),
             events: None,
@@ -50,6 +53,29 @@ impl App {
         if !self.session.is_running() {
             self.events = None;
             self.stopper = None;
+            self.save_index();
+        }
+    }
+
+    fn save_index(&self) {
+        let (Some(id), Some(first), Some(last)) = (
+            self.session.session_id(),
+            self.session.runs.first(),
+            self.session.current(),
+        ) else {
+            return;
+        };
+        let now = store::now();
+        let entry = IndexEntry {
+            session_id: id.to_string(),
+            title: first.prompt.lines().next().unwrap_or_default().to_string(),
+            started_at: now,
+            updated_at: now,
+            cost_usd: self.session.totals().and_then(|t| t.cost_usd),
+            status: format!("{:?}", last.status).to_lowercase(),
+        };
+        if let Err(error) = self.store.save_entry(entry) {
+            eprintln!("turbo-harness: cannot save the session index: {error}");
         }
     }
 
@@ -131,8 +157,10 @@ impl App {
         let prompt = self.prompt.trim().to_string();
         let cmd =
             runner::claude_command(&self.claude, &prompt, self.session.session_id(), &self.dir);
+        let mut log = self.store.log_writer(self.session.session_id());
+        log.write(&store::prompt_line(&prompt, store::now()));
         let ctx = ctx.clone();
-        match runner::start(cmd, move || ctx.request_repaint()) {
+        match runner::start(cmd, Some(log), move || ctx.request_repaint()) {
             Ok(handle) => {
                 self.session.begin(Run::new(&prompt));
                 self.events = Some(handle.events);
