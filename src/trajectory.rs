@@ -134,7 +134,7 @@ pub fn first_lines(text: &str, n: usize) -> &str {
     prefix.strip_suffix('\r').unwrap_or(prefix)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Trajectory {
     pub nodes: Vec<Node>,
     pub roots: Vec<NodeId>,

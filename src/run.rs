@@ -17,7 +17,7 @@ pub struct RunStats {
     pub turns: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Run {
     pub prompt: String,
     pub trajectory: Trajectory,

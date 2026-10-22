@@ -229,3 +229,28 @@ fn each_line_of_a_run_goes_to_the_log_of_its_session() {
         expected
     );
 }
+
+#[test]
+fn a_session_loaded_from_its_log_equals_the_live_one() {
+    let store = temp_store("replay");
+    let mut log = store.log_writer(None);
+    log.write(&store::prompt_line("Start a nested subagent", 1));
+    let rx = start(fake_claude("subagents.jsonl"), Some(log), || {})
+        .unwrap()
+        .events;
+    let mut live = Session::default();
+    live.begin(Run::new("Start a nested subagent"));
+    loop {
+        let msg = rx.recv_timeout(TIMEOUT).expect("the run did not end");
+        let exited = matches!(msg, RunMsg::Exited { .. });
+        live.apply(msg);
+        if exited {
+            break;
+        }
+    }
+
+    let id = live.session_id().unwrap();
+    let loaded = Session::replay(&store.read_log(id));
+    assert_eq!(loaded, live);
+    assert_eq!(loaded.runs[0].status, RunStatus::Done);
+}
