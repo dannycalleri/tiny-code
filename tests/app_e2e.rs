@@ -95,3 +95,21 @@ fn a_long_result_is_collapsed_and_expands_on_click() {
     harness.get_by_label("Show all 2000 lines");
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn a_result_saved_to_a_file_shows_its_size_and_a_link() {
+    let claude = fake_claude_for("saved_output.jsonl", "saved");
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "List /usr/bin");
+    wait_for_the_run(&mut harness);
+
+    harness.get_by_label("Output · 55.9KB · preview");
+    harness.get_by_label("Open full output");
+    assert!(
+        harness
+            .query_by_label_contains("persisted-output")
+            .is_none()
+    );
+    let _ = std::fs::remove_file(claude);
+}

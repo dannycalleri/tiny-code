@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde_json::Value;
 
@@ -39,6 +40,13 @@ pub struct ToolResult {
     pub is_error: bool,
     pub line_count: usize,
     pub preview: String,
+    pub saved: Option<SavedOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedOutput {
+    pub size: String,
+    pub path: PathBuf,
 }
 
 impl ToolResult {
@@ -46,7 +54,12 @@ impl ToolResult {
     pub const EXPANDED_LINES: usize = 500;
 
     fn new(text: String, is_error: bool) -> Self {
+        let (text, saved) = match read_saved_output(&text) {
+            Some((saved, preview)) => (preview, Some(saved)),
+            None => (text, None),
+        };
         ToolResult {
+            saved,
             line_count: text.lines().count(),
             preview: first_lines(&text, Self::PREVIEW_LINES).to_string(),
             text,
@@ -64,6 +77,41 @@ impl ToolResult {
             )
         }
     }
+}
+
+fn read_saved_output(text: &str) -> Option<(SavedOutput, String)> {
+    let body = text
+        .strip_prefix("<persisted-output>")?
+        .trim_end()
+        .strip_suffix("</persisted-output>")?
+        .trim();
+    let (header, rest) = body.split_once('\n').unwrap_or((body, ""));
+    let size = header
+        .strip_prefix("Output too large (")?
+        .split_once(')')?
+        .0;
+    let path = header.split_once("saved to: ")?.1.trim();
+    if size.is_empty() || path.is_empty() {
+        return None;
+    }
+    let rest = rest.trim_start_matches('\n');
+    let preview = match rest.split_once('\n') {
+        Some((first, after)) if first.starts_with("Preview (") => after,
+        _ => rest,
+    };
+    let preview = preview.trim_end();
+    let preview = match preview.rsplit_once('\n') {
+        Some((before, "...")) => before,
+        None if preview == "..." => "",
+        _ => preview,
+    };
+    Some((
+        SavedOutput {
+            size: size.to_string(),
+            path: PathBuf::from(path),
+        },
+        preview.trim_end().to_string(),
+    ))
 }
 
 pub fn first_lines(text: &str, n: usize) -> &str {
@@ -464,6 +512,44 @@ mod tests {
                 (count, preview),
                 "{content:?}"
             );
+        }
+    }
+
+    const SAVED: &str = "<persisted-output>\nOutput too large (55.9KB). Full output saved to: /home/user/.claude/tool-results/b1.txt\n\nPreview (first 2KB):\ntotal 172184\ndrwxr-xr-x  926 root  wheel  29632 .\n...\n</persisted-output>";
+
+    #[test]
+    fn a_saved_output_stub_gives_size_path_and_preview() {
+        let result = ToolResult::new(SAVED.into(), false);
+        assert_eq!(
+            result.saved,
+            Some(SavedOutput {
+                size: "55.9KB".into(),
+                path: PathBuf::from("/home/user/.claude/tool-results/b1.txt"),
+            })
+        );
+        assert_eq!(
+            result.text,
+            "total 172184\ndrwxr-xr-x  926 root  wheel  29632 ."
+        );
+        assert_eq!(result.line_count, 2);
+    }
+
+    #[test]
+    fn only_a_standalone_ellipsis_line_is_dropped_from_the_preview() {
+        let stub = "<persisted-output>\nOutput too large (9KB). Full output saved to: /x.txt\n\nPreview (first 2KB):\nnpm WARN deprecated\nDownloading...\n</persisted-output>";
+        let result = ToolResult::new(stub.into(), false);
+        assert_eq!(result.text, "npm WARN deprecated\nDownloading...");
+    }
+
+    #[test]
+    fn a_stub_without_a_size_or_a_path_stays_plain_text() {
+        for text in [
+            "<persisted-output>\nOutput too large. Full output saved to: /x.txt\n</persisted-output>",
+            "<persisted-output>\nOutput too large (5KB). Somewhere else\n</persisted-output>",
+            "<persisted-output>\nOutput too large (5KB). Full output saved to: /x.txt\n",
+        ] {
+            let result = ToolResult::new(text.into(), false);
+            assert_eq!((result.saved, result.text.as_str()), (None, text));
         }
     }
 

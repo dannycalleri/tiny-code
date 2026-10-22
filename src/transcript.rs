@@ -111,11 +111,12 @@ fn tool_card(ui: &mut egui::Ui, id: NodeId, tool: &Tool, show_all: &mut HashSet<
 
 fn tool_result(ui: &mut egui::Ui, id: NodeId, result: &ToolResult, show_all: &mut HashSet<NodeId>) {
     let kind = if result.is_error { "Error" } else { "Output" };
-    let lines = match result.line_count {
-        1 => "1 line".to_string(),
-        n => format!("{n} lines"),
+    let amount = match (&result.saved, result.line_count) {
+        (Some(saved), _) => format!("{} · preview", saved.size),
+        (None, 1) => "1 line".to_string(),
+        (None, n) => format!("{n} lines"),
     };
-    let open = egui::CollapsingHeader::new(format!("{kind} · {lines}"))
+    let open = egui::CollapsingHeader::new(format!("{kind} · {amount}"))
         .id_salt("result")
         .default_open(false)
         .show(ui, |ui| {
@@ -127,6 +128,10 @@ fn tool_result(ui: &mut egui::Ui, id: NodeId, result: &ToolResult, show_all: &mu
                 show_all.insert(id);
             }
         });
+    if let Some(saved) = &result.saved {
+        let url = format!("file://{}", saved.path.display()).replace(' ', "%20");
+        ui.hyperlink_to("Open full output", url);
+    }
     if open.body_returned.is_none() && !result.preview.is_empty() {
         let color = if result.is_error {
             ui.visuals().error_fg_color
