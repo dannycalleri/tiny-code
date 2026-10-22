@@ -1,25 +1,28 @@
+use std::collections::HashSet;
+
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::run::Run;
-use crate::trajectory::{Node, Tool, ToolStatus};
+use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus};
 
 pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 
 #[derive(Debug, Default)]
-pub struct Follow {
+pub struct View {
     jump: bool,
+    show_all: HashSet<NodeId>,
 }
 
-pub fn show(ui: &mut egui::Ui, run: &Run, markdown: &mut CommonMarkCache, follow: &mut Follow) {
-    let jump = std::mem::take(&mut follow.jump);
+pub fn show(ui: &mut egui::Ui, run: &Run, markdown: &mut CommonMarkCache, view: &mut View) {
+    let jump = std::mem::take(&mut view.jump);
     let output = egui::ScrollArea::vertical()
         .auto_shrink(false)
         .stick_to_bottom(true)
         .show(ui, |ui| {
             prompt_bubble(ui, &run.prompt);
             for (id, node) in run.trajectory.nodes.iter().enumerate() {
-                ui.push_id(id, |ui| item(ui, node, markdown));
+                ui.push_id(id, |ui| item(ui, id, node, markdown, &mut view.show_all));
             }
             if let Some(error) = &run.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -41,7 +44,7 @@ pub fn show(ui: &mut egui::Ui, run: &Run, markdown: &mut CommonMarkCache, follow
             egui::vec2(130.0, 28.0),
         );
         if ui.put(at, egui::Button::new("⬇ Jump to latest")).clicked() {
-            follow.jump = true;
+            view.jump = true;
             ui.ctx().request_repaint();
         }
     }
@@ -63,7 +66,13 @@ fn prompt_bubble(ui: &mut egui::Ui, prompt: &str) {
     ui.add_space(6.0);
 }
 
-fn item(ui: &mut egui::Ui, node: &Node, markdown: &mut CommonMarkCache) {
+fn item(
+    ui: &mut egui::Ui,
+    id: NodeId,
+    node: &Node,
+    markdown: &mut CommonMarkCache,
+    show_all: &mut HashSet<NodeId>,
+) {
     match node {
         Node::Text(text) => {
             CommonMarkViewer::new().show_with_id(ui.scope_id(), ui, markdown, text);
@@ -76,7 +85,7 @@ fn item(ui: &mut egui::Ui, node: &Node, markdown: &mut CommonMarkCache) {
                 .default_open(false)
                 .show(ui, |ui| ui.label(egui::RichText::new(text).weak()));
         }
-        Node::Tool(tool) => tool_card(ui, tool),
+        Node::Tool(tool) => tool_card(ui, id, tool, show_all),
         Node::System(line) => {
             ui.label(egui::RichText::new(line).small().weak());
         }
@@ -84,7 +93,7 @@ fn item(ui: &mut egui::Ui, node: &Node, markdown: &mut CommonMarkCache) {
     ui.add_space(4.0);
 }
 
-fn tool_card(ui: &mut egui::Ui, tool: &Tool) {
+fn tool_card(ui: &mut egui::Ui, id: NodeId, tool: &Tool, show_all: &mut HashSet<NodeId>) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -94,7 +103,42 @@ fn tool_card(ui: &mut egui::Ui, tool: &Tool) {
                 egui::Label::new(egui::RichText::new(&tool.summary).monospace().weak()).truncate(),
             );
         });
+        if let Some(result) = &tool.result {
+            tool_result(ui, id, result, show_all);
+        }
     });
+}
+
+fn tool_result(ui: &mut egui::Ui, id: NodeId, result: &ToolResult, show_all: &mut HashSet<NodeId>) {
+    let kind = if result.is_error { "Error" } else { "Output" };
+    let lines = match result.line_count {
+        1 => "1 line".to_string(),
+        n => format!("{n} lines"),
+    };
+    let open = egui::CollapsingHeader::new(format!("{kind} · {lines}"))
+        .id_salt("result")
+        .default_open(false)
+        .show(ui, |ui| {
+            let (text, button) = result.expanded(show_all.contains(&id));
+            ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
+            if let Some(count) = button
+                && ui.button(format!("Show all {count} lines")).clicked()
+            {
+                show_all.insert(id);
+            }
+        });
+    if open.body_returned.is_none() && !result.preview.is_empty() {
+        let color = if result.is_error {
+            ui.visuals().error_fg_color
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.label(
+            egui::RichText::new(&result.preview)
+                .monospace()
+                .color(color),
+        );
+    }
 }
 
 fn status_icon(ui: &mut egui::Ui, status: ToolStatus) {

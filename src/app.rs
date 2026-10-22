@@ -7,7 +7,7 @@ use egui_commonmark::CommonMarkCache;
 
 use crate::run::{Run, RunStatus};
 use crate::runner::{self, RunMsg};
-use crate::transcript::{self, Follow};
+use crate::transcript::{self, View};
 
 pub struct App {
     dir: PathBuf,
@@ -16,7 +16,7 @@ pub struct App {
     run: Option<Run>,
     events: Option<Receiver<RunMsg>>,
     markdown: CommonMarkCache,
-    follow: Follow,
+    view: View,
 }
 
 impl App {
@@ -28,7 +28,7 @@ impl App {
             run: None,
             events: None,
             markdown: CommonMarkCache::default(),
-            follow: Follow::default(),
+            view: View::default(),
         }
     }
 
@@ -83,7 +83,7 @@ impl App {
         });
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(run) = &self.run {
-                transcript::show(ui, run, &mut self.markdown, &mut self.follow);
+                transcript::show(ui, run, &mut self.markdown, &mut self.view);
             }
         });
     }
@@ -103,7 +103,7 @@ impl App {
             Err(error) => self.run = Some(Run::failed_to_start(&prompt, error)),
         }
         self.prompt.clear();
-        self.follow = Follow::default();
+        self.view = View::default();
     }
 }
 

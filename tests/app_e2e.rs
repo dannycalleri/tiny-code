@@ -80,3 +80,18 @@ fn a_run_shows_markdown_and_a_card_per_tool_call() {
     harness.get_by_label("✖");
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn a_long_result_is_collapsed_and_expands_on_click() {
+    let claude = fake_claude_for("long_result.jsonl", "long");
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Print 2000 lines");
+    wait_for_the_run(&mut harness);
+
+    assert!(harness.query_by_label("Show all 2000 lines").is_none());
+    harness.get_by_label("Output · 2000 lines").click();
+    harness.run();
+    harness.get_by_label("Show all 2000 lines");
+    let _ = std::fs::remove_file(claude);
+}

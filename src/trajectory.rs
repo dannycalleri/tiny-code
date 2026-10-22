@@ -37,6 +37,45 @@ pub enum ToolStatus {
 pub struct ToolResult {
     pub text: String,
     pub is_error: bool,
+    pub line_count: usize,
+    pub preview: String,
+}
+
+impl ToolResult {
+    pub const PREVIEW_LINES: usize = 3;
+    pub const EXPANDED_LINES: usize = 500;
+
+    fn new(text: String, is_error: bool) -> Self {
+        ToolResult {
+            line_count: text.lines().count(),
+            preview: first_lines(&text, Self::PREVIEW_LINES).to_string(),
+            text,
+            is_error,
+        }
+    }
+
+    pub fn expanded(&self, show_all: bool) -> (&str, Option<usize>) {
+        if show_all || self.line_count <= Self::EXPANDED_LINES {
+            (&self.text, None)
+        } else {
+            (
+                first_lines(&self.text, Self::EXPANDED_LINES),
+                Some(self.line_count),
+            )
+        }
+    }
+}
+
+pub fn first_lines(text: &str, n: usize) -> &str {
+    if n == 0 {
+        return "";
+    }
+    let end = text
+        .match_indices('\n')
+        .nth(n - 1)
+        .map_or(text.len(), |(at, _)| at);
+    let prefix = &text[..end];
+    prefix.strip_suffix('\r').unwrap_or(prefix)
 }
 
 #[derive(Debug, Default)]
@@ -114,10 +153,7 @@ impl Trajectory {
                 content,
                 is_error,
             } => {
-                let result = ToolResult {
-                    text: result_text(content),
-                    is_error: *is_error,
-                };
+                let result = ToolResult::new(result_text(content), *is_error);
                 match self.tools.get(tool_use_id).map(|&id| &mut self.nodes[id]) {
                     Some(Node::Tool(tool)) => {
                         tool.status = if result.is_error {
@@ -372,6 +408,84 @@ mod tests {
         assert!(cut.ends_with('…'));
         assert_eq!(one_line("short"), "short");
         assert_eq!(one_line("\n  cargo test\n"), "cargo test");
+    }
+
+    #[test]
+    fn first_lines_of_short_text_is_the_whole_text() {
+        assert_eq!(first_lines("", 3), "");
+        assert_eq!(first_lines("one", 3), "one");
+        assert_eq!(first_lines("one\ntwo\nthree", 3), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn first_lines_stops_before_the_break_after_line_n() {
+        assert_eq!(first_lines("one\ntwo\nthree\nfour", 3), "one\ntwo\nthree");
+        assert_eq!(first_lines("one\ntwo\n", 1), "one");
+    }
+
+    #[test]
+    fn first_lines_drops_the_carriage_return_of_crlf() {
+        assert_eq!(first_lines("one\r\ntwo\r\nthree", 2), "one\r\ntwo");
+    }
+
+    #[test]
+    fn first_lines_with_zero_is_empty() {
+        assert_eq!(first_lines("one\ntwo", 0), "");
+    }
+
+    fn numbered(lines: usize) -> String {
+        (1..=lines).map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[test]
+    fn apply_counts_lines_and_keeps_a_preview() {
+        for (content, count, preview) in [
+            ("", 0, ""),
+            ("one\ntwo", 2, "one\ntwo"),
+            (numbered(10).as_str(), 10, "line 1\nline 2\nline 3"),
+        ] {
+            let mut t = trajectory(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]}}"#,
+            );
+            t.push(&Event::User(crate::event::MessageEvent {
+                message: crate::event::Message {
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "t".into(),
+                        content: Value::String(content.into()),
+                        is_error: false,
+                    }],
+                },
+                parent_tool_use_id: None,
+                session_id: None,
+            }));
+            let result = tools(&t)[0].result.clone().unwrap();
+            assert_eq!(
+                (result.line_count, result.preview.as_str()),
+                (count, preview),
+                "{content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_shows_everything_up_to_the_cap() {
+        let result = ToolResult::new(numbered(500), false);
+        assert_eq!(result.expanded(false), (result.text.as_str(), None));
+    }
+
+    #[test]
+    fn expanded_cuts_at_the_cap_and_offers_show_all() {
+        let result = ToolResult::new(numbered(501), false);
+        let (text, show_all) = result.expanded(false);
+        assert_eq!(text.lines().count(), 500);
+        assert!(text.ends_with("line 500"));
+        assert_eq!(show_all, Some(501));
+    }
+
+    #[test]
+    fn expanded_with_show_all_has_everything_and_no_button() {
+        let result = ToolResult::new(numbered(501), false);
+        assert_eq!(result.expanded(true), (result.text.as_str(), None));
     }
 
     #[test]
