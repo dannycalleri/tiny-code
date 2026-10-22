@@ -20,7 +20,9 @@ impl Session {
             match raw["type"].as_str() {
                 Some("turbo_prompt") => {
                     session.close_unfinished_run();
-                    session.begin(Run::new(raw["prompt"].as_str().unwrap_or_default()));
+                    let mut run = Run::new(raw["prompt"].as_str().unwrap_or_default());
+                    run.started_at = raw["at"].as_u64();
+                    session.begin(run);
                 }
                 Some("turbo_exit") => {
                     if raw["stopped"] == true
@@ -134,8 +136,12 @@ mod tests {
             ok,
         ];
         let session = Session::replay(&lines);
-        let prompts: Vec<&str> = session.runs.iter().map(|r| r.prompt.as_str()).collect();
-        assert_eq!(prompts, ["first", "second"]);
+        let prompts: Vec<(&str, Option<u64>)> = session
+            .runs
+            .iter()
+            .map(|r| (r.prompt.as_str(), r.started_at))
+            .collect();
+        assert_eq!(prompts, [("first", Some(1)), ("second", Some(2))]);
         assert!(session.runs.iter().all(|r| r.status == RunStatus::Done));
         assert_eq!(session.session_id(), Some("abc"));
         assert_eq!(session.totals().unwrap().cost_usd, Some(1.0));

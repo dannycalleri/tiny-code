@@ -113,7 +113,7 @@ fn upsert(entries: &mut Vec<IndexEntry>, entry: IndexEntry) {
         Some(existing) => {
             *existing = IndexEntry {
                 title: std::mem::take(&mut existing.title),
-                started_at: existing.started_at,
+                started_at: existing.started_at.min(entry.started_at),
                 ..entry
             }
         }
@@ -208,6 +208,13 @@ mod tests {
         let mut changed = entry("a", "first", 1, 0.5);
         changed.updated_at = 9;
         assert_eq!(entries, [changed, entry("b", "second", 2, 0.2)]);
+    }
+
+    #[test]
+    fn an_index_update_with_an_earlier_start_corrects_it() {
+        let mut entries = vec![entry("a", "first", 5, 0.1)];
+        upsert(&mut entries, entry("a", "first", 1, 0.1));
+        assert_eq!(entries[0].started_at, 1);
     }
 
     #[test]

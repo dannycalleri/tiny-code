@@ -71,7 +71,7 @@ impl App {
         let entry = IndexEntry {
             session_id: id.to_string(),
             title: first.prompt.lines().next().unwrap_or_default().to_string(),
-            started_at: now,
+            started_at: first.started_at.unwrap_or(now),
             updated_at: now,
             cost_usd: self.session.totals().and_then(|t| t.cost_usd),
             status: format!("{:?}", last.status).to_lowercase(),
@@ -206,12 +206,15 @@ impl App {
         let prompt = self.prompt.trim().to_string();
         let cmd =
             runner::claude_command(&self.claude, &prompt, self.session.session_id(), &self.dir);
+        let started_at = store::now();
         let mut log = self.store.log_writer(self.session.session_id());
-        log.write(&store::prompt_line(&prompt, store::now()));
+        log.write(&store::prompt_line(&prompt, started_at));
         let ctx = ctx.clone();
         match runner::start(cmd, Some(log), move || ctx.request_repaint()) {
             Ok(handle) => {
-                self.session.begin(Run::new(&prompt));
+                let mut run = Run::new(&prompt);
+                run.started_at = Some(started_at);
+                self.session.begin(run);
                 self.events = Some(handle.events);
                 self.stopper = Some(handle.stopper);
             }

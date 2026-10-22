@@ -239,7 +239,9 @@ fn a_session_loaded_from_its_log_equals_the_live_one() {
         .unwrap()
         .events;
     let mut live = Session::default();
-    live.begin(Run::new("Start a nested subagent"));
+    let mut run = Run::new("Start a nested subagent");
+    run.started_at = Some(1);
+    live.begin(run);
     loop {
         let msg = rx.recv_timeout(TIMEOUT).expect("the run did not end");
         let exited = matches!(msg, RunMsg::Exited { .. });

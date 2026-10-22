@@ -25,6 +25,7 @@ pub struct Run {
     pub error: Option<String>,
     pub stats: Option<RunStats>,
     pub session_id: Option<String>,
+    pub started_at: Option<u64>,
     result_is_error: Option<bool>,
     stop_requested: bool,
 }
@@ -38,6 +39,7 @@ impl Run {
             error: None,
             stats: None,
             session_id: None,
+            started_at: None,
             result_is_error: None,
             stop_requested: false,
         }

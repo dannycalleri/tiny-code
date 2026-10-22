@@ -232,7 +232,7 @@ fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
         .save_entry(IndexEntry {
             session_id: ID.into(),
             title: "Say hello".into(),
-            started_at: 1,
+            started_at: 50,
             updated_at: 1,
             cost_usd: Some(0.05),
             status: "done".into(),
@@ -255,6 +255,7 @@ fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
         harness.get_all_by_label("Hello, nice to meet you!").count(),
         2
     );
+    assert_eq!(store.index()[0].started_at, 1);
 
     harness
         .get_by_role_and_label(Role::Button, "New session")
