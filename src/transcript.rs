@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
-use crate::run::Run;
+use crate::run::{Run, RunStats};
 use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus};
 
 pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
@@ -47,6 +47,38 @@ pub fn show(ui: &mut egui::Ui, run: &Run, markdown: &mut CommonMarkCache, view: 
             view.jump = true;
             ui.ctx().request_repaint();
         }
+    }
+}
+
+pub fn stats_line(stats: Option<&RunStats>) -> String {
+    let stats = stats.copied().unwrap_or(RunStats {
+        cost_usd: None,
+        duration_ms: None,
+        turns: None,
+    });
+    let cost = match stats.cost_usd {
+        Some(cost) if cost > 0.0 && cost < 0.01 => "<$0.01".to_string(),
+        Some(cost) => format!("${cost:.2}"),
+        None => "—".to_string(),
+    };
+    let duration = stats.duration_ms.map_or("—".to_string(), duration);
+    let turns = match stats.turns {
+        Some(1) => "1 turn".to_string(),
+        Some(n) => format!("{n} turns"),
+        None => "— turns".to_string(),
+    };
+    format!("{cost} · {duration} · {turns}")
+}
+
+fn duration(ms: u64) -> String {
+    let tenths = (ms + 50) / 100;
+    if tenths < 600 {
+        return format!("{}.{} s", tenths / 10, tenths % 10);
+    }
+    let seconds = (ms + 500) / 1000;
+    match seconds {
+        0..3600 => format!("{} m {:02} s", seconds / 60, seconds % 60),
+        _ => format!("{} h {:02} m", seconds / 3600, seconds % 3600 / 60),
     }
 }
 
@@ -176,6 +208,40 @@ fn quiet_spinner(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stats(cost: Option<f64>, ms: Option<u64>, turns: Option<u32>) -> RunStats {
+        RunStats {
+            cost_usd: cost,
+            duration_ms: ms,
+            turns,
+        }
+    }
+
+    #[test]
+    fn stats_line_formats_cost_duration_and_turns() {
+        let line = stats_line(Some(&stats(Some(0.1938), Some(2771), Some(1))));
+        assert_eq!(line, "$0.19 · 2.8 s · 1 turn");
+        let line = stats_line(Some(&stats(Some(1.5), Some(65_000), Some(4))));
+        assert_eq!(line, "$1.50 · 1 m 05 s · 4 turns");
+        let line = stats_line(Some(&stats(Some(0.0), Some(59_960), Some(2))));
+        assert_eq!(line, "$0.00 · 1 m 00 s · 2 turns");
+        let line = stats_line(Some(&stats(Some(0.0), Some(3_725_000), Some(0))));
+        assert_eq!(line, "$0.00 · 1 h 02 m · 0 turns");
+    }
+
+    #[test]
+    fn a_cost_under_a_cent_does_not_look_free() {
+        assert!(stats_line(Some(&stats(Some(0.004), None, None))).starts_with("<$0.01 "));
+    }
+
+    #[test]
+    fn missing_values_show_a_dash() {
+        assert_eq!(stats_line(None), "— · — · — turns");
+        assert_eq!(
+            stats_line(Some(&stats(Some(0.2), None, Some(2)))),
+            "$0.20 · — · 2 turns"
+        );
+    }
 
     #[test]
     fn at_bottom_when_the_viewport_reaches_the_end() {

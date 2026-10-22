@@ -76,6 +76,7 @@ fn a_run_shows_markdown_and_a_card_per_tool_call() {
     harness.get_by_label("/home/user/demo/missing.txt");
     assert_eq!(harness.get_all_by_label("Read").count(), 2);
     harness.get_by_label("✔ done");
+    harness.get_by_label("Last run: $0.23 · 9.4 s · 4 turns");
     assert_eq!(harness.get_all_by_label("✔").count(), 2);
     harness.get_by_label("✖");
     let _ = std::fs::remove_file(claude);

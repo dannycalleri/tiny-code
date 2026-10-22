@@ -67,6 +67,16 @@ impl App {
                 }
             });
         });
+        if let Some(run) = self.run.as_ref().filter(|r| r.status != RunStatus::Running) {
+            egui::Panel::bottom("footer").show(ui, |ui| {
+                let line = transcript::stats_line(run.stats.as_ref());
+                ui.label(
+                    egui::RichText::new(format!("Last run: {line}"))
+                        .small()
+                        .weak(),
+                );
+            });
+        }
         egui::Panel::bottom("composer").show(ui, |ui| {
             let id = egui::Id::unique("composer_text");
             let enter = ui.memory(|m| m.has_focus(id)) && ui.input_mut(take_send_key);
