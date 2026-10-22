@@ -114,3 +114,38 @@ fn a_result_saved_to_a_file_shows_its_size_and_a_link() {
     );
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn a_subagent_card_is_collapsed_and_shows_its_steps_on_click() {
+    let claude = fake_claude_for("subagents.jsonl", "subagents");
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Start a nested subagent");
+    wait_for_the_run(&mut harness);
+
+    assert!(harness.query_by_label("Read").is_none());
+    harness
+        .get_by_label("✔ Agent · Nested grep then read main.rs · 3 steps")
+        .click();
+    harness.run();
+    harness.get_by_label("Read");
+    harness.get_by_label("/home/user/demo/main.rs");
+    harness.get_by_label("✔ Agent · Grep TODO in subdemo · 0 steps");
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn an_orphan_step_is_marked_and_steps_under_any_call_stay_visible() {
+    let claude = fake_claude_for("orphan.jsonl", "orphan");
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "List and read");
+    wait_for_the_run(&mut harness);
+
+    harness.get_by_label("⚠ orphan: its parent call is unknown");
+    harness.get_by_label("/home/user/demo/a.txt");
+    harness.get_by_label("✔ Bash · ls · 0 steps").click();
+    harness.run();
+    harness.get_by_label("Nested under Bash");
+    let _ = std::fs::remove_file(claude);
+}

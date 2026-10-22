@@ -28,6 +28,12 @@ pub struct Tool {
     pub steps: usize,
 }
 
+impl Tool {
+    pub fn is_subagent(&self) -> bool {
+        matches!(self.name.as_str(), "Agent" | "Task")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
@@ -271,6 +277,7 @@ fn input_summary(tool_name: &str, input: &Value) -> String {
         "Bash" => Some("command"),
         "Read" | "Edit" | "Write" => Some("file_path"),
         "Grep" | "Glob" => Some("pattern"),
+        "Agent" | "Task" => Some("description"),
         _ => None,
     };
     let known = field.and_then(|f| input[f].as_str());
@@ -474,6 +481,14 @@ mod tests {
         for name in ["Grep", "Glob"] {
             let input = serde_json::json!({"path": "src", "pattern": "fn main"});
             assert_eq!(summary(name, input), "fn main", "{name}");
+        }
+    }
+
+    #[test]
+    fn subagent_summary_is_the_description() {
+        for name in ["Agent", "Task"] {
+            let input = serde_json::json!({"context": "long brief", "description": "Find TODOs"});
+            assert_eq!(summary(name, input), "Find TODOs", "{name}");
         }
     }
 

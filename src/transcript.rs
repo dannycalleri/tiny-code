@@ -4,7 +4,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::run::{Run, RunStats};
-use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus};
+use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus, Trajectory};
 
 pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 
@@ -35,9 +35,12 @@ pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, vie
                     ui.add_space(8.0);
                 }
                 prompt_bubble(ui, &run.prompt);
-                for (id, node) in run.trajectory.nodes.iter().enumerate() {
-                    let key = (index, id);
-                    ui.push_id(key, |ui| item(ui, key, node, markdown, &mut view.show_all));
+                for &id in &run.trajectory.roots {
+                    let items = Items {
+                        run: index,
+                        trajectory: &run.trajectory,
+                    };
+                    items.show(ui, id, markdown, &mut view.show_all);
                 }
                 if let Some(error) = &run.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -114,31 +117,116 @@ fn prompt_bubble(ui: &mut egui::Ui, prompt: &str) {
     ui.add_space(6.0);
 }
 
-fn item(
-    ui: &mut egui::Ui,
-    key: ItemKey,
-    node: &Node,
-    markdown: &mut CommonMarkCache,
-    show_all: &mut HashSet<ItemKey>,
-) {
-    match node {
-        Node::Text(text) => {
-            CommonMarkViewer::new().show_with_id(ui.scope_id(), ui, markdown, text);
-        }
-        Node::UserText(text) => {
-            ui.label(egui::RichText::new(format!("↪ {text}")).weak());
-        }
-        Node::Thinking(text) => {
-            egui::CollapsingHeader::new(egui::RichText::new("Thinking").weak().italics())
-                .default_open(false)
-                .show(ui, |ui| ui.label(egui::RichText::new(text).weak()));
-        }
-        Node::Tool(tool) => tool_card(ui, key, tool, show_all),
-        Node::System(line) => {
-            ui.label(egui::RichText::new(line).small().weak());
-        }
+#[derive(Clone, Copy)]
+struct Items<'a> {
+    run: usize,
+    trajectory: &'a Trajectory,
+}
+
+impl Items<'_> {
+    fn show(
+        self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        markdown: &mut CommonMarkCache,
+        show_all: &mut HashSet<ItemKey>,
+    ) {
+        let key = (self.run, id);
+        ui.push_id(key, |ui| {
+            if self.trajectory.is_orphan(id) {
+                ui.label(
+                    egui::RichText::new("⚠ orphan: its parent call is unknown")
+                        .small()
+                        .weak(),
+                );
+            }
+            self.item(ui, key, markdown, show_all);
+        });
     }
-    ui.add_space(4.0);
+
+    fn item(
+        self,
+        ui: &mut egui::Ui,
+        key: ItemKey,
+        markdown: &mut CommonMarkCache,
+        show_all: &mut HashSet<ItemKey>,
+    ) {
+        match &self.trajectory.nodes[key.1] {
+            Node::Text(text) => {
+                CommonMarkViewer::new().show_with_id(ui.scope_id(), ui, markdown, text);
+            }
+            Node::UserText(text) => {
+                ui.label(egui::RichText::new(format!("↪ {text}")).weak());
+            }
+            Node::Thinking(text) => {
+                egui::CollapsingHeader::new(egui::RichText::new("Thinking").weak().italics())
+                    .default_open(false)
+                    .show(ui, |ui| ui.label(egui::RichText::new(text).weak()));
+            }
+            Node::Tool(tool) if tool.is_subagent() || !tool.children.is_empty() => {
+                self.subagent_card(ui, key, tool, markdown, show_all)
+            }
+            Node::Tool(tool) => tool_card(ui, key, tool, show_all),
+            Node::System(line) => {
+                ui.label(egui::RichText::new(line).small().weak());
+            }
+        }
+        ui.add_space(4.0);
+    }
+
+    fn subagent_card(
+        self,
+        ui: &mut egui::Ui,
+        key: ItemKey,
+        tool: &Tool,
+        markdown: &mut CommonMarkCache,
+        show_all: &mut HashSet<ItemKey>,
+    ) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::CollapsingHeader::new(subagent_header(ui, tool))
+                .id_salt("subagent")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for &child in &tool.children {
+                        self.show(ui, child, markdown, show_all);
+                    }
+                });
+            if let Some(result) = &tool.result {
+                tool_result(ui, key, result, show_all);
+            }
+        });
+    }
+}
+
+fn subagent_header(ui: &egui::Ui, tool: &Tool) -> egui::text::LayoutJob {
+    let visuals = ui.visuals();
+    let (glyph, color) = match status_glyph(visuals, tool.status) {
+        Some(glyph) => glyph,
+        None => ("⏺", visuals.warn_fg_color),
+    };
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let format = |color| egui::TextFormat::simple(font.clone(), color);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(glyph, 0.0, format(color));
+    job.append(
+        &format!(" {}", subagent_label(tool)),
+        0.0,
+        format(visuals.strong_text_color()),
+    );
+    job
+}
+
+fn subagent_label(tool: &Tool) -> String {
+    let steps = match tool.steps {
+        1 => "1 step".to_string(),
+        n => format!("{n} steps"),
+    };
+    if tool.summary.is_empty() {
+        format!("{} · {steps}", tool.name)
+    } else {
+        format!("{} · {} · {steps}", tool.name, tool.summary)
+    }
 }
 
 fn tool_card(ui: &mut egui::Ui, key: ItemKey, tool: &Tool, show_all: &mut HashSet<ItemKey>) {
@@ -200,14 +288,24 @@ fn tool_result(
 }
 
 fn status_icon(ui: &mut egui::Ui, status: ToolStatus) {
-    let visuals = ui.visuals();
-    let (glyph, color) = match status {
-        ToolStatus::Running => return quiet_spinner(ui),
-        ToolStatus::Ok => ("✔", OK_GREEN),
-        ToolStatus::Error => ("✖", visuals.error_fg_color),
-        ToolStatus::Interrupted => ("⏸", visuals.weak_text_color()),
-    };
-    ui.label(egui::RichText::new(glyph).color(color));
+    match status_glyph(ui.visuals(), status) {
+        Some((glyph, color)) => {
+            ui.label(egui::RichText::new(glyph).color(color));
+        }
+        None => quiet_spinner(ui),
+    }
+}
+
+fn status_glyph(
+    visuals: &egui::Visuals,
+    status: ToolStatus,
+) -> Option<(&'static str, egui::Color32)> {
+    match status {
+        ToolStatus::Running => None,
+        ToolStatus::Ok => Some(("✔", OK_GREEN)),
+        ToolStatus::Error => Some(("✖", visuals.error_fg_color)),
+        ToolStatus::Interrupted => Some(("⏸", visuals.weak_text_color())),
+    }
 }
 
 // egui::Spinner requests a repaint every frame; this one relies on App's 100 ms repaint instead.
@@ -262,6 +360,32 @@ mod tests {
             stats_line(Some(&stats(Some(0.2), None, Some(2)))),
             "$0.20 · — · 2 turns"
         );
+    }
+
+    fn agent(summary: &str, steps: usize) -> Tool {
+        Tool {
+            id: "a".into(),
+            name: "Agent".into(),
+            input: serde_json::Value::Null,
+            summary: summary.into(),
+            result: None,
+            status: ToolStatus::Running,
+            children: Vec::new(),
+            steps,
+        }
+    }
+
+    #[test]
+    fn subagent_label_has_name_description_and_steps() {
+        assert_eq!(
+            subagent_label(&agent("Find TODOs", 3)),
+            "Agent · Find TODOs · 3 steps"
+        );
+        assert_eq!(
+            subagent_label(&agent("Find TODOs", 1)),
+            "Agent · Find TODOs · 1 step"
+        );
+        assert_eq!(subagent_label(&agent("", 0)), "Agent · 0 steps");
     }
 
     #[test]
