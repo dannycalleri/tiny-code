@@ -16,6 +16,7 @@ pub struct App {
     dir: PathBuf,
     claude: String,
     store: Store,
+    history: Vec<IndexEntry>,
     prompt: String,
     session: Session,
     events: Option<Receiver<RunMsg>>,
@@ -30,6 +31,7 @@ impl App {
         App {
             dir,
             claude,
+            history: store.history(),
             store,
             prompt: String::new(),
             session: Session::default(),
@@ -57,7 +59,7 @@ impl App {
         }
     }
 
-    fn save_index(&self) {
+    fn save_index(&mut self) {
         let (Some(id), Some(first), Some(last)) = (
             self.session.session_id(),
             self.session.runs.first(),
@@ -77,6 +79,50 @@ impl App {
         if let Err(error) = self.store.save_entry(entry) {
             eprintln!("turbo-harness: cannot save the session index: {error}");
         }
+        self.history = self.store.history();
+    }
+
+    fn open_session(&mut self, session_id: &str) {
+        self.session = Session::replay(&self.store.read_log(session_id));
+        self.view = View::default();
+        self.view.jump_to_latest();
+    }
+
+    fn new_session(&mut self) {
+        self.session = Session::default();
+        self.view = View::default();
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        ui.add_enabled_ui(!self.is_running(), |ui| {
+            if ui.button("New session").clicked() {
+                self.new_session();
+            }
+            ui.separator();
+            let now = store::now();
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    for entry in &self.history {
+                        let selected = self.session.session_id() == Some(&entry.session_id);
+                        let title = egui::Button::selectable(selected, &entry.title).truncate();
+                        if ui.add(title).clicked() {
+                            open = Some(entry.session_id.clone());
+                        }
+                        let detail = format!(
+                            "{} · {}",
+                            ago(now, entry.updated_at),
+                            transcript::cost_label(entry.cost_usd)
+                        );
+                        ui.label(egui::RichText::new(detail).small().weak());
+                        ui.add_space(4.0);
+                    }
+                });
+        });
+        if let Some(id) = open {
+            self.open_session(&id);
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -84,6 +130,9 @@ impl App {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         let show_outline = outline::show_outline(ui.max_rect().width(), self.outline);
+        egui::Panel::left("history")
+            .default_size(220.0)
+            .show(ui, |ui| self.sidebar(ui));
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.dir.display().to_string());
@@ -192,6 +241,16 @@ impl eframe::App for App {
     }
 }
 
+fn ago(now: u64, then: u64) -> String {
+    let seconds = now.saturating_sub(then);
+    match seconds {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86_400 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86_400),
+    }
+}
+
 fn take_send_key(input: &mut egui::InputState) -> bool {
     // consume_key ignores an extra Shift, so without this check Shift+Enter would also send.
     !input.modifiers.shift && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -223,6 +282,17 @@ mod tests {
             modifiers,
         });
         input
+    }
+
+    #[test]
+    fn ago_picks_the_largest_whole_unit() {
+        let now = 1_000_000;
+        assert_eq!(ago(now, now - 59), "just now");
+        assert_eq!(ago(now, now - 60), "1 min ago");
+        assert_eq!(ago(now, now - 3599), "59 min ago");
+        assert_eq!(ago(now, now - 3600), "1 h ago");
+        assert_eq!(ago(now, now - 86_400 * 3), "3 d ago");
+        assert_eq!(ago(now, now + 5), "just now");
     }
 
     #[test]

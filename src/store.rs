@@ -37,6 +37,12 @@ impl Store {
         self.dir.join(format!("{session_id}.jsonl"))
     }
 
+    pub fn history(&self) -> Vec<IndexEntry> {
+        let mut entries = self.index();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
+        entries
+    }
+
     pub fn index(&self) -> Vec<IndexEntry> {
         fs::read(self.dir.join("index.json"))
             .ok()
@@ -212,6 +218,16 @@ mod tests {
         store.save_entry(entry("b", "second", 2, 0.2)).unwrap();
         assert_eq!(store.index().len(), 2);
         assert!(!store.dir.join("index.json.tmp").exists());
+    }
+
+    #[test]
+    fn history_lists_the_sessions_newest_first() {
+        let store = temp_store("history");
+        for (id, at) in [("old", 1), ("new", 3), ("mid", 2)] {
+            store.save_entry(entry(id, id, at, 0.1)).unwrap();
+        }
+        let ids: Vec<String> = store.history().into_iter().map(|e| e.session_id).collect();
+        assert_eq!(ids, ["new", "mid", "old"]);
     }
 
     #[test]

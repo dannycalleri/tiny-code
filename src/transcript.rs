@@ -259,11 +259,7 @@ pub fn stats_line(stats: Option<&RunStats>) -> String {
         duration_ms: None,
         turns: None,
     });
-    let cost = match stats.cost_usd {
-        Some(cost) if cost > 0.0 && cost < 0.01 => "<$0.01".to_string(),
-        Some(cost) => format!("${cost:.2}"),
-        None => "—".to_string(),
-    };
+    let cost = cost_label(stats.cost_usd);
     let duration = stats.duration_ms.map_or("—".to_string(), duration);
     let turns = match stats.turns {
         Some(1) => "1 turn".to_string(),
@@ -271,6 +267,14 @@ pub fn stats_line(stats: Option<&RunStats>) -> String {
         None => "— turns".to_string(),
     };
     format!("{cost} · {duration} · {turns}")
+}
+
+pub(crate) fn cost_label(cost: Option<f64>) -> String {
+    match cost {
+        Some(cost) if cost > 0.0 && cost < 0.01 => "<$0.01".to_string(),
+        Some(cost) => format!("${cost:.2}"),
+        None => "—".to_string(),
+    }
 }
 
 fn duration(ms: u64) -> String {

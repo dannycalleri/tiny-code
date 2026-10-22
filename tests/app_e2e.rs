@@ -6,9 +6,13 @@ use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use turbo_harness::app::App;
-use turbo_harness::store::Store;
+use turbo_harness::store::{self, IndexEntry, Store};
 
 fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
+    fake_claude_with(fixture, name, "")
+}
+
+fn fake_claude_with(fixture: &str, name: &str, env: &str) -> PathBuf {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let wrapper = std::env::temp_dir().join(format!(
         "turbo-harness-e2e-{}-{name}.sh",
@@ -17,14 +21,19 @@ fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nFAKE_FIXTURE='{}' exec sh '{}' \"$@\"\n",
+            "#!/bin/sh\n{env} FAKE_FIXTURE='{}' exec sh '{}' \"$@\"\n",
             tests.join("fixtures").join(fixture).display(),
             tests.join("fake_claude.sh").display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(wrapper.with_extension("store"));
     wrapper
+}
+
+fn store_of(claude: &Path) -> Store {
+    Store::open(&claude.with_extension("store"), &std::env::temp_dir())
 }
 
 fn harness(claude: PathBuf) -> Harness<'static, App> {
@@ -32,9 +41,11 @@ fn harness(claude: PathBuf) -> Harness<'static, App> {
 }
 
 fn harness_sized(claude: PathBuf, size: [f32; 2]) -> Harness<'static, App> {
-    let _ = std::fs::remove_dir_all(claude.with_extension("store"));
-    let store = Store::open(&claude.with_extension("store"), &std::env::temp_dir());
-    let app = App::new(std::env::temp_dir(), claude.display().to_string(), store);
+    let app = App::new(
+        std::env::temp_dir(),
+        claude.display().to_string(),
+        store_of(&claude),
+    );
     Harness::builder()
         .with_size(size)
         .with_max_steps(16)
@@ -88,7 +99,7 @@ fn a_run_shows_markdown_and_a_card_per_tool_call() {
     assert_eq!(harness.get_all_by_label("✔").count(), 2);
     harness.get_by_label("✖");
 
-    let index = Store::open(&claude.with_extension("store"), &std::env::temp_dir()).index();
+    let index = store_of(&claude).index();
     let [entry] = &index[..] else {
         panic!("{index:?}")
     };
@@ -197,5 +208,61 @@ fn clicking_a_nested_call_in_the_outline_opens_and_shows_its_card() {
         top < card.top() && card.bottom() < bottom,
         "{card:?} not in {top}..{bottom}"
     );
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
+    const ID: &str = "9e26b157-1db2-4ff3-99fc-8737a92f55ba";
+    let argv = std::env::temp_dir().join(format!("turbo-harness-e2e-{}-argv", std::process::id()));
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "history",
+        &format!("FAKE_ARGV='{}'", argv.display()),
+    );
+    let store = store_of(&claude);
+    let mut log = store.log_writer(Some(ID));
+    log.write(&store::prompt_line("Say hello", 1));
+    for line in include_str!("fixtures/hello.jsonl").lines() {
+        log.write(line);
+    }
+    log.write(&store::exit_line(Some(0), &[], false));
+    store
+        .save_entry(IndexEntry {
+            session_id: ID.into(),
+            title: "Say hello".into(),
+            started_at: 1,
+            updated_at: 1,
+            cost_usd: Some(0.05),
+            status: "done".into(),
+        })
+        .unwrap();
+    let mut harness = harness(claude.clone());
+
+    assert!(harness.query_by_label("Hello, nice to meet you!").is_none());
+    harness
+        .get_by_role_and_label(Role::Button, "Say hello")
+        .click();
+    harness.run();
+    harness.get_by_label("Hello, nice to meet you!");
+
+    send(&mut harness, "And again");
+    wait_for_the_run(&mut harness);
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert!(args.contains(&format!("--resume\n{ID}\n")), "{args}");
+    assert_eq!(
+        harness.get_all_by_label("Hello, nice to meet you!").count(),
+        2
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, "New session")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label("Hello, nice to meet you!").is_none());
+    send(&mut harness, "Fresh start");
+    wait_for_the_run(&mut harness);
+    assert!(!std::fs::read_to_string(&argv).unwrap().contains("--resume"));
+    let _ = std::fs::remove_file(argv);
     let _ = std::fs::remove_file(claude);
 }
