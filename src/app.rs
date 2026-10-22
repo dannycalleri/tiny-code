@@ -57,7 +57,7 @@ impl App {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.dir.display().to_string());
-                if let Some(run) = &self.session.current {
+                if let Some(run) = self.session.current() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         status_badge(ui, run.status);
                     });
@@ -66,17 +66,16 @@ impl App {
         });
         if let Some(run) = self
             .session
-            .current
-            .as_ref()
+            .current()
             .filter(|r| r.status != RunStatus::Running)
         {
             egui::Panel::bottom("footer").show(ui, |ui| {
-                let line = transcript::stats_line(run.stats.as_ref());
-                ui.label(
-                    egui::RichText::new(format!("Last run: {line}"))
-                        .small()
-                        .weak(),
-                );
+                let mut line = format!("Last run: {}", transcript::stats_line(run.stats.as_ref()));
+                if self.session.runs.len() > 1 {
+                    let totals = self.session.totals();
+                    line += &format!("   Session: {}", transcript::stats_line(totals.as_ref()));
+                }
+                ui.label(egui::RichText::new(line).small().weak());
             });
         }
         egui::Panel::bottom("composer").show(ui, |ui| {
@@ -100,9 +99,7 @@ impl App {
             });
         });
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(run) = &self.session.current {
-                transcript::show(ui, run, &mut self.markdown, &mut self.view);
-            }
+            transcript::show(ui, &self.session.runs, &mut self.markdown, &mut self.view);
         });
     }
 
@@ -123,13 +120,13 @@ impl App {
             Err(error) => self.session.begin(Run::failed_to_start(&prompt, error)),
         }
         self.prompt.clear();
-        self.view = View::default();
+        self.view.jump_to_latest();
     }
 }
 
 impl App {
     fn stop(&mut self) {
-        if let (Some(stopper), Some(run)) = (&self.stopper, &mut self.session.current) {
+        if let (Some(stopper), Some(run)) = (&self.stopper, self.session.current_mut()) {
             run.request_stop();
             stopper.stop();
         }

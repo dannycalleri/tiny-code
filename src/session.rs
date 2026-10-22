@@ -1,9 +1,9 @@
-use crate::run::{Run, RunStatus};
+use crate::run::{Run, RunStats, RunStatus};
 use crate::runner::RunMsg;
 
 #[derive(Debug, Default)]
 pub struct Session {
-    pub current: Option<Run>,
+    pub runs: Vec<Run>,
     session_id: Option<String>,
 }
 
@@ -12,10 +12,29 @@ impl Session {
         self.session_id.as_deref()
     }
 
+    pub fn current(&self) -> Option<&Run> {
+        self.runs.last()
+    }
+
+    pub fn current_mut(&mut self) -> Option<&mut Run> {
+        self.runs.last_mut()
+    }
+
     pub fn is_running(&self) -> bool {
-        self.current
-            .as_ref()
+        self.current()
             .is_some_and(|run| run.status == RunStatus::Running)
+    }
+
+    pub fn totals(&self) -> Option<RunStats> {
+        let stats: Vec<RunStats> = self.runs.iter().filter_map(|run| run.stats).collect();
+        if stats.is_empty() {
+            return None;
+        }
+        Some(RunStats {
+            cost_usd: sum(stats.iter().map(|s| s.cost_usd)),
+            duration_ms: sum(stats.iter().map(|s| s.duration_ms)),
+            turns: sum(stats.iter().map(|s| s.turns)),
+        })
     }
 
     pub fn can_send(&self, prompt: &str) -> bool {
@@ -23,16 +42,24 @@ impl Session {
     }
 
     pub fn begin(&mut self, run: Run) {
-        self.current = Some(run);
+        self.runs.push(run);
     }
 
     pub fn apply(&mut self, msg: RunMsg) {
-        let Some(run) = &mut self.current else { return };
+        let Some(run) = self.runs.last_mut() else {
+            return;
+        };
         run.apply(msg);
         if let Some(id) = &run.session_id {
             self.session_id = Some(id.clone());
         }
     }
+}
+
+fn sum<T: std::iter::Sum<T>>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
+    let mut present = values.flatten().peekable();
+    present.peek()?;
+    Some(present.sum())
 }
 
 #[cfg(test)]
@@ -72,6 +99,57 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"session_id":"xyz"}"#,
         ));
         assert_eq!(session.session_id(), Some("xyz"));
+    }
+
+    fn finished_run(result: &str) -> Run {
+        let mut run = Run::new("p");
+        run.apply(event(result));
+        run.apply(RunMsg::Exited {
+            code: Some(0),
+            stderr: vec![],
+        });
+        run
+    }
+
+    #[test]
+    fn earlier_runs_are_kept_in_order() {
+        let mut session = Session::default();
+        session.begin(Run::new("first"));
+        session.apply(RunMsg::Exited {
+            code: Some(0),
+            stderr: vec![],
+        });
+        session.begin(Run::new("second"));
+        let prompts: Vec<&str> = session.runs.iter().map(|r| r.prompt.as_str()).collect();
+        assert_eq!(prompts, ["first", "second"]);
+        assert_eq!(session.current().unwrap().prompt, "second");
+    }
+
+    #[test]
+    fn totals_sum_two_runs_and_skip_a_run_without_stats() {
+        let mut session = Session::default();
+        session.runs.push(finished_run(
+            r#"{"type":"result","subtype":"success","total_cost_usd":0.25,"duration_ms":1000,"num_turns":2}"#,
+        ));
+        session
+            .runs
+            .push(Run::failed_to_start("p", "no claude".into()));
+        session.runs.push(finished_run(
+            r#"{"type":"result","subtype":"success","total_cost_usd":0.5,"num_turns":3}"#,
+        ));
+        let totals = session.totals().unwrap();
+        assert_eq!(totals.cost_usd, Some(0.75));
+        assert_eq!(totals.duration_ms, Some(1000));
+        assert_eq!(totals.turns, Some(5));
+    }
+
+    #[test]
+    fn no_totals_without_any_stats() {
+        let mut session = Session::default();
+        session
+            .runs
+            .push(Run::failed_to_start("p", "no claude".into()));
+        assert_eq!(session.totals(), None);
     }
 
     #[test]

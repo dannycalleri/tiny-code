@@ -5,6 +5,8 @@
 # so a test can prove that the first event arrives while the process still runs.
 # With $FAKE_HANG set, it then starts `sleep 30` in the background, writes its pid to that file and
 # waits, like a long tool call. $FAKE_IGNORE_TERM=leader or =grandchild makes that one ignore SIGTERM.
+# With $FAKE_ARGV set, it first writes its arguments to that file, one per line.
+[ -n "$FAKE_ARGV" ] && printf '%s\n' "$@" > "$FAKE_ARGV"
 first=1
 while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"

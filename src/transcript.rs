@@ -8,24 +8,40 @@ use crate::trajectory::{Node, NodeId, Tool, ToolResult, ToolStatus};
 
 pub(crate) const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(80, 170, 90);
 
+type ItemKey = (usize, NodeId);
+
 #[derive(Debug, Default)]
 pub struct View {
     jump: bool,
-    show_all: HashSet<NodeId>,
+    show_all: HashSet<ItemKey>,
 }
 
-pub fn show(ui: &mut egui::Ui, run: &Run, markdown: &mut CommonMarkCache, view: &mut View) {
+impl View {
+    pub fn jump_to_latest(&mut self) {
+        self.jump = true;
+    }
+}
+
+pub fn show(ui: &mut egui::Ui, runs: &[Run], markdown: &mut CommonMarkCache, view: &mut View) {
     let jump = std::mem::take(&mut view.jump);
     let output = egui::ScrollArea::vertical()
         .auto_shrink(false)
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            prompt_bubble(ui, &run.prompt);
-            for (id, node) in run.trajectory.nodes.iter().enumerate() {
-                ui.push_id(id, |ui| item(ui, id, node, markdown, &mut view.show_all));
-            }
-            if let Some(error) = &run.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+            for (index, run) in runs.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                }
+                prompt_bubble(ui, &run.prompt);
+                for (id, node) in run.trajectory.nodes.iter().enumerate() {
+                    let key = (index, id);
+                    ui.push_id(key, |ui| item(ui, key, node, markdown, &mut view.show_all));
+                }
+                if let Some(error) = &run.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
             }
             if jump {
                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
@@ -100,10 +116,10 @@ fn prompt_bubble(ui: &mut egui::Ui, prompt: &str) {
 
 fn item(
     ui: &mut egui::Ui,
-    id: NodeId,
+    key: ItemKey,
     node: &Node,
     markdown: &mut CommonMarkCache,
-    show_all: &mut HashSet<NodeId>,
+    show_all: &mut HashSet<ItemKey>,
 ) {
     match node {
         Node::Text(text) => {
@@ -117,7 +133,7 @@ fn item(
                 .default_open(false)
                 .show(ui, |ui| ui.label(egui::RichText::new(text).weak()));
         }
-        Node::Tool(tool) => tool_card(ui, id, tool, show_all),
+        Node::Tool(tool) => tool_card(ui, key, tool, show_all),
         Node::System(line) => {
             ui.label(egui::RichText::new(line).small().weak());
         }
@@ -125,7 +141,7 @@ fn item(
     ui.add_space(4.0);
 }
 
-fn tool_card(ui: &mut egui::Ui, id: NodeId, tool: &Tool, show_all: &mut HashSet<NodeId>) {
+fn tool_card(ui: &mut egui::Ui, key: ItemKey, tool: &Tool, show_all: &mut HashSet<ItemKey>) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -136,12 +152,17 @@ fn tool_card(ui: &mut egui::Ui, id: NodeId, tool: &Tool, show_all: &mut HashSet<
             );
         });
         if let Some(result) = &tool.result {
-            tool_result(ui, id, result, show_all);
+            tool_result(ui, key, result, show_all);
         }
     });
 }
 
-fn tool_result(ui: &mut egui::Ui, id: NodeId, result: &ToolResult, show_all: &mut HashSet<NodeId>) {
+fn tool_result(
+    ui: &mut egui::Ui,
+    key: ItemKey,
+    result: &ToolResult,
+    show_all: &mut HashSet<ItemKey>,
+) {
     let kind = if result.is_error { "Error" } else { "Output" };
     let amount = match (&result.saved, result.line_count) {
         (Some(saved), _) => format!("{} · preview", saved.size),
@@ -152,12 +173,12 @@ fn tool_result(ui: &mut egui::Ui, id: NodeId, result: &ToolResult, show_all: &mu
         .id_salt("result")
         .default_open(false)
         .show(ui, |ui| {
-            let (text, button) = result.expanded(show_all.contains(&id));
+            let (text, button) = result.expanded(show_all.contains(&key));
             ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
             if let Some(count) = button
                 && ui.button(format!("Show all {count} lines")).clicked()
             {
-                show_all.insert(id);
+                show_all.insert(key);
             }
         });
     if let Some(saved) = &result.saved {

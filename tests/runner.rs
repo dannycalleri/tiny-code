@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use turbo_harness::event::{Event, parse_line};
 use turbo_harness::run::{Run, RunStatus};
 use turbo_harness::runner::{RunMsg, claude_command, start};
+use turbo_harness::session::Session;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -152,4 +153,42 @@ fn stop_kills_a_process_that_ignores_sigterm() {
 #[test]
 fn stop_kills_a_child_that_ignores_sigterm_after_claude_exits() {
     assert!(stop_a_hanging_run(Some("grandchild")) < Duration::from_secs(1));
+}
+
+#[test]
+fn a_follow_up_resumes_the_session_of_the_first_run() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_claude.sh");
+    let argv = temp_path("argv");
+    let mut session = Session::default();
+    for prompt in ["first", "follow-up"] {
+        let mut cmd = claude_command(
+            script.to_str().unwrap(),
+            prompt,
+            session.session_id(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        cmd.env(
+            "FAKE_FIXTURE",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.jsonl"),
+        )
+        .env("FAKE_ARGV", &argv);
+        let handle = start(cmd, || {}).unwrap();
+        session.begin(Run::new(prompt));
+        while session.is_running() {
+            session.apply(
+                handle
+                    .events
+                    .recv_timeout(TIMEOUT)
+                    .expect("the run did not end"),
+            );
+        }
+    }
+    let args = std::fs::read_to_string(&argv).unwrap();
+    let _ = std::fs::remove_file(&argv);
+    let args: Vec<&str> = args.lines().collect();
+    assert_eq!(args[1], "follow-up");
+    assert_eq!(
+        args[args.len() - 2..],
+        ["--resume", "9e26b157-1db2-4ff3-99fc-8737a92f55ba"]
+    );
 }
