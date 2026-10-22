@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -12,7 +12,7 @@ pub enum Node {
     Text(String),
     UserText(String),
     Thinking(String),
-    Tool(Tool),
+    Tool(Box<Tool>),
     System(String),
 }
 
@@ -24,6 +24,8 @@ pub struct Tool {
     pub summary: String,
     pub result: Option<ToolResult>,
     pub status: ToolStatus,
+    pub children: Vec<NodeId>,
+    pub steps: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +131,9 @@ pub fn first_lines(text: &str, n: usize) -> &str {
 #[derive(Debug, Default)]
 pub struct Trajectory {
     pub nodes: Vec<Node>,
+    pub roots: Vec<NodeId>,
+    parents: Vec<Option<NodeId>>,
+    orphans: HashSet<NodeId>,
     tools: HashMap<String, NodeId>,
 }
 
@@ -143,12 +148,15 @@ impl Trajectory {
         }
     }
 
+    pub fn is_orphan(&self, id: NodeId) -> bool {
+        self.orphans.contains(&id)
+    }
+
     pub fn push(&mut self, event: &Event) {
         match event {
             Event::System(s) if s.subtype == "init" => {
                 let model = s.model.as_deref().unwrap_or("unknown model");
-                self.nodes
-                    .push(Node::System(format!("session started · {model}")));
+                self.add(Node::System(format!("session started · {model}")), None);
             }
             Event::System(s) if s.subtype == "hook_started" => {}
             Event::System(s) => {
@@ -156,45 +164,81 @@ impl Trajectory {
                     Some(name) => format!("{} {name}", s.subtype),
                     None => s.subtype.clone(),
                 };
-                self.nodes.push(Node::System(label));
+                self.add(Node::System(label), None);
             }
             Event::Assistant(m) | Event::User(m) => {
                 let from_user = matches!(event, Event::User(_));
+                let parent = m.parent_tool_use_id.as_deref();
                 for block in &m.message.content {
-                    self.push_block(block, from_user);
+                    self.push_block(block, from_user, parent);
                 }
             }
-            Event::RateLimit => self.nodes.push(Node::System("rate limit update".into())),
+            Event::RateLimit => {
+                self.add(Node::System("rate limit update".into()), None);
+            }
             Event::Result(_) => {}
-            Event::Unknown(v) => self.nodes.push(Node::System(format!(
-                "unknown event {}",
-                v["type"].as_str().unwrap_or("without a type")
-            ))),
-            Event::Unparsed(line) => self
-                .nodes
-                .push(Node::System(format!("unparsed line: {line}"))),
+            Event::Unknown(v) => {
+                let kind = v["type"].as_str().unwrap_or("without a type");
+                self.add(Node::System(format!("unknown event {kind}")), None);
+            }
+            Event::Unparsed(line) => {
+                self.add(Node::System(format!("unparsed line: {line}")), None);
+            }
         }
     }
 
-    fn push_block(&mut self, block: &ContentBlock, from_user: bool) {
+    fn add(&mut self, node: Node, parent_tool_use_id: Option<&str>) -> NodeId {
+        let id = self.nodes.len();
+        let is_tool = matches!(node, Node::Tool(_));
+        self.nodes.push(node);
+        let parent = parent_tool_use_id.and_then(|p| self.tools.get(p).copied());
+        self.parents.push(parent);
+        let Some(parent) = parent else {
+            if parent_tool_use_id.is_some() {
+                self.orphans.insert(id);
+            }
+            self.roots.push(id);
+            return id;
+        };
+        if let Node::Tool(tool) = &mut self.nodes[parent] {
+            tool.children.push(id);
+        }
+        if is_tool {
+            let mut ancestor = Some(parent);
+            while let Some(at) = ancestor {
+                if let Node::Tool(tool) = &mut self.nodes[at] {
+                    tool.steps += 1;
+                }
+                ancestor = self.parents[at];
+            }
+        }
+        id
+    }
+
+    fn push_block(&mut self, block: &ContentBlock, from_user: bool, parent: Option<&str>) {
         match block {
             ContentBlock::Text { text } if from_user => {
-                self.nodes.push(Node::UserText(text.clone()))
+                self.add(Node::UserText(text.clone()), parent);
             }
-            ContentBlock::Text { text } => self.nodes.push(Node::Text(text.clone())),
+            ContentBlock::Text { text } => {
+                self.add(Node::Text(text.clone()), parent);
+            }
             ContentBlock::Thinking { thinking } => {
-                self.nodes.push(Node::Thinking(thinking.clone()))
+                self.add(Node::Thinking(thinking.clone()), parent);
             }
             ContentBlock::ToolUse { id, name, input } => {
-                self.tools.insert(id.clone(), self.nodes.len());
-                self.nodes.push(Node::Tool(Tool {
+                let tool = Node::Tool(Box::new(Tool {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
                     summary: input_summary(name, input),
                     result: None,
                     status: ToolStatus::Running,
+                    children: Vec::new(),
+                    steps: 0,
                 }));
+                let node = self.add(tool, parent);
+                self.tools.insert(id.clone(), node);
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -211,9 +255,10 @@ impl Trajectory {
                         };
                         tool.result = Some(result);
                     }
-                    _ => self.nodes.push(Node::System(format!(
-                        "result for unknown call {tool_use_id}"
-                    ))),
+                    _ => {
+                        let line = format!("result for unknown call {tool_use_id}");
+                        self.add(Node::System(line), parent);
+                    }
                 }
             }
             ContentBlock::Other => {}
@@ -281,7 +326,7 @@ mod tests {
         t.nodes
             .iter()
             .filter_map(|n| match n {
-                Node::Tool(tool) => Some(tool),
+                Node::Tool(tool) => Some(&**tool),
                 _ => None,
             })
             .collect()
@@ -594,5 +639,106 @@ mod tests {
                 Node::UserText("sub-prompt".into())
             ]
         );
+    }
+
+    fn tool_named<'a>(t: &'a Trajectory, name: &str) -> (NodeId, &'a Tool) {
+        t.nodes
+            .iter()
+            .enumerate()
+            .find_map(|(id, n)| match n {
+                Node::Tool(tool) if tool.name == name => Some((id, &**tool)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn names(t: &Trajectory, ids: &[NodeId]) -> Vec<String> {
+        ids.iter()
+            .map(|&id| match &t.nodes[id] {
+                Node::Tool(tool) => tool.name.clone(),
+                Node::UserText(_) => "prompt".into(),
+                Node::Text(_) => "text".into(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn call(parent: Option<&str>, id: &str, name: &str) -> String {
+        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{}}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn subagent_steps_go_under_their_agent_call() {
+        let t = trajectory(include_str!("../tests/fixtures/subagents.jsonl"));
+        let (outer, agent) = tool_named(&t, "Agent");
+        assert_eq!(
+            names(&t, &agent.children),
+            ["prompt", "Agent", "Read", "SubagentHandback"]
+        );
+        assert!(t.roots.contains(&outer));
+        let (read, nested_read) = tool_named(&t, "Read");
+        assert!(!t.roots.contains(&read));
+        assert_eq!(nested_read.status, ToolStatus::Ok);
+        assert!(
+            nested_read
+                .result
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("fn main")
+        );
+    }
+
+    #[test]
+    fn a_subagent_inside_a_subagent_nests_at_depth_two() {
+        let t = trajectory(
+            &[
+                call(None, "outer", "Agent"),
+                call(Some("outer"), "inner", "Agent"),
+                call(Some("inner"), "grep", "Grep"),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(names(&t, &t.roots), ["Agent"]);
+        let Node::Tool(outer) = &t.nodes[t.roots[0]] else {
+            panic!()
+        };
+        let Node::Tool(inner) = &t.nodes[outer.children[0]] else {
+            panic!()
+        };
+        assert_eq!(inner.id, "inner");
+        assert_eq!(names(&t, &inner.children), ["Grep"]);
+    }
+
+    #[test]
+    fn an_unknown_parent_gives_a_top_level_orphan() {
+        let t = trajectory(&[call(None, "a", "Bash"), call(Some("gone"), "b", "Read")].join("\n"));
+        assert_eq!(names(&t, &t.roots), ["Bash", "Read"]);
+        assert!(!t.is_orphan(t.roots[0]));
+        assert!(t.is_orphan(t.roots[1]));
+    }
+
+    #[test]
+    fn steps_count_every_nested_tool_call_at_any_depth() {
+        let t = trajectory(
+            &[
+                call(None, "outer", "Agent"),
+                call(Some("outer"), "inner", "Agent"),
+                call(Some("inner"), "grep", "Grep"),
+                call(Some("inner"), "read", "Read"),
+                call(Some("outer"), "bash", "Bash"),
+            ]
+            .join("\n"),
+        );
+        let steps = |id: &str| match &t.nodes[t.tools[id]] {
+            Node::Tool(tool) => tool.steps,
+            _ => panic!(),
+        };
+        assert_eq!((steps("outer"), steps("inner"), steps("grep")), (4, 2, 0));
+        let captured = trajectory(include_str!("../tests/fixtures/subagents.jsonl"));
+        assert_eq!(tool_named(&captured, "Agent").1.steps, 3);
     }
 }
