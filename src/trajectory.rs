@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::event::{ContentBlock, Event};
+use crate::event::{ContentBlock, Event, SystemEvent};
 
 pub type NodeId = usize;
 
@@ -26,11 +26,18 @@ pub struct Tool {
     pub status: ToolStatus,
     pub children: Vec<NodeId>,
     pub steps: usize,
+    pub reported_steps: usize,
+    pub unstreamed_steps: usize,
 }
 
 impl Tool {
     pub fn is_subagent(&self) -> bool {
         matches!(self.name.as_str(), "Agent" | "Task")
+    }
+
+    // Claude Code streams only first-level subagent steps; deeper ones show only in task events.
+    pub fn step_count(&self) -> usize {
+        self.steps + self.unstreamed_steps
     }
 }
 
@@ -141,6 +148,7 @@ pub struct Trajectory {
     parents: Vec<Option<NodeId>>,
     orphans: HashSet<NodeId>,
     tools: HashMap<String, NodeId>,
+    tasks: HashMap<String, NodeId>,
 }
 
 impl Trajectory {
@@ -176,6 +184,7 @@ impl Trajectory {
                 self.add(Node::System(format!("session started · {model}")), None);
             }
             Event::System(s) if s.subtype == "hook_started" => {}
+            Event::System(s) if s.subtype.starts_with("task_") => self.push_task(s),
             Event::System(s) => {
                 let label = match s.hook_name.as_deref() {
                     Some(name) => format!("{} {name}", s.subtype),
@@ -204,6 +213,51 @@ impl Trajectory {
         }
     }
 
+    fn push_task(&mut self, event: &SystemEvent) {
+        let by_call = event.tool_use_id.as_ref().and_then(|id| self.tools.get(id));
+        let by_task = event.task_id.as_ref().and_then(|id| self.tasks.get(id));
+        let Some(&node) = by_call.or(by_task) else {
+            self.add(Node::System(event.subtype.clone()), None);
+            return;
+        };
+        if let Some(task_id) = &event.task_id {
+            self.tasks.insert(task_id.clone(), node);
+        }
+        let reported = event.usage.as_ref().and_then(|u| u["tool_uses"].as_u64());
+        let before = self.own_unstreamed(node);
+        if let (Node::Tool(tool), Some(reported)) = (&mut self.nodes[node], reported) {
+            tool.reported_steps = tool.reported_steps.max(reported as usize);
+        }
+        self.settle_unstreamed(node, before);
+    }
+
+    // `reported_steps` counts direct calls only, so the gap is measured against direct children.
+    fn own_unstreamed(&self, id: NodeId) -> usize {
+        let Node::Tool(tool) = &self.nodes[id] else {
+            return 0;
+        };
+        let streamed = tool
+            .children
+            .iter()
+            .filter(|&&child| matches!(self.nodes[child], Node::Tool(_)))
+            .count();
+        tool.reported_steps.saturating_sub(streamed)
+    }
+
+    fn settle_unstreamed(&mut self, id: NodeId, before: usize) {
+        let after = self.own_unstreamed(id);
+        if after == before {
+            return;
+        }
+        let mut ancestor = Some(id);
+        while let Some(at) = ancestor {
+            if let Node::Tool(tool) = &mut self.nodes[at] {
+                tool.unstreamed_steps = tool.unstreamed_steps + after - before;
+            }
+            ancestor = self.parents[at];
+        }
+    }
+
     fn add(&mut self, node: Node, parent_tool_use_id: Option<&str>) -> NodeId {
         let id = self.nodes.len();
         let is_tool = matches!(node, Node::Tool(_));
@@ -217,9 +271,11 @@ impl Trajectory {
             self.roots.push(id);
             return id;
         };
+        let before = self.own_unstreamed(parent);
         if let Node::Tool(tool) = &mut self.nodes[parent] {
             tool.children.push(id);
         }
+        self.settle_unstreamed(parent, before);
         if is_tool {
             let mut ancestor = Some(parent);
             while let Some(at) = ancestor {
@@ -253,6 +309,8 @@ impl Trajectory {
                     status: ToolStatus::Running,
                     children: Vec::new(),
                     steps: 0,
+                    reported_steps: 0,
+                    unstreamed_steps: 0,
                 }));
                 let node = self.add(tool, parent);
                 self.tools.insert(id.clone(), node);
@@ -783,5 +841,59 @@ mod tests {
         assert_eq!((steps("outer"), steps("inner"), steps("grep")), (4, 2, 0));
         let captured = trajectory(include_str!("../tests/fixtures/subagents.jsonl"));
         assert_eq!(tool_named(&captured, "Agent").1.steps, 3);
+    }
+
+    #[test]
+    fn task_events_fold_into_their_call_and_report_the_steps_not_streamed() {
+        let t = trajectory(include_str!("../tests/fixtures/subagents.jsonl"));
+        assert!(
+            !t.nodes
+                .iter()
+                .any(|n| matches!(n, Node::System(s) if s.starts_with("task_")))
+        );
+        let Node::Tool(outer) = &t.nodes[t.tools["toolu_01EQL7hTN2QvLt1Uvqxqpu3a"]] else {
+            panic!()
+        };
+        let Node::Tool(nested) = &t.nodes[t.tools["toolu_01F3BmMZKBG5a3SFyA7Qggjw"]] else {
+            panic!()
+        };
+        assert_eq!((nested.steps, nested.step_count()), (0, 2));
+        assert_eq!((outer.steps, outer.step_count()), (3, 5));
+    }
+
+    #[test]
+    fn a_task_event_finds_its_call_by_task_id_or_stays_a_line() {
+        let t = trajectory(
+            &[
+                call(None, "a", "Agent"),
+                r#"{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"a"}"#.into(),
+                r#"{"type":"system","subtype":"task_updated","task_id":"t1","usage":{"tool_uses":4}}"#.into(),
+                r#"{"type":"system","subtype":"task_progress","task_id":"t9","tool_use_id":"gone"}"#.into(),
+            ]
+            .join("\n"),
+        );
+        let Node::Tool(agent) = &t.nodes[t.tools["a"]] else {
+            panic!()
+        };
+        assert_eq!(agent.step_count(), 4);
+        assert_eq!(t.nodes[1..], [Node::System("task_progress".into())]);
+    }
+
+    #[test]
+    fn a_streamed_call_replaces_a_reported_one_instead_of_adding_to_it() {
+        let t = trajectory(
+            &[
+                call(None, "outer", "Agent"),
+                call(Some("outer"), "inner", "Agent"),
+                r#"{"type":"system","subtype":"task_progress","tool_use_id":"inner","usage":{"tool_uses":2}}"#.into(),
+                call(Some("inner"), "grep", "Grep"),
+            ]
+            .join("\n"),
+        );
+        let count = |id: &str| match &t.nodes[t.tools[id]] {
+            Node::Tool(tool) => tool.step_count(),
+            _ => panic!(),
+        };
+        assert_eq!((count("outer"), count("inner")), (3, 2));
     }
 }

@@ -21,6 +21,9 @@ pub struct SystemEvent {
     pub cwd: Option<String>,
     pub hook_name: Option<String>,
     pub outcome: Option<String>,
+    pub task_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

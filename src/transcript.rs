@@ -416,7 +416,7 @@ fn subagent_header(ui: &egui::Ui, tool: &Tool) -> egui::text::LayoutJob {
 }
 
 fn subagent_label(tool: &Tool) -> String {
-    let steps = match tool.steps {
+    let steps = match tool.step_count() {
         1 => "1 step".to_string(),
         n => format!("{n} steps"),
     };
@@ -577,6 +577,8 @@ mod tests {
             status: ToolStatus::Running,
             children: Vec::new(),
             steps,
+            reported_steps: 0,
+            unstreamed_steps: 0,
         }
     }
 
