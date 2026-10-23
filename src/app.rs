@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use eframe::egui;
@@ -24,6 +24,8 @@ enum SidebarClick {
     Open(usize, String),
 }
 
+pub type FolderPicker = Box<dyn FnMut() -> Receiver<Option<PathBuf>>>;
+
 pub struct App {
     data_dir: PathBuf,
     claude: String,
@@ -37,20 +39,32 @@ pub struct App {
     markdown: CommonMarkCache,
     view: View,
     outline: Option<bool>,
+    pick_folder: FolderPicker,
+    picking: Option<Receiver<Option<PathBuf>>>,
+}
+
+impl ProjectStore {
+    fn open(data_dir: &Path, dir: &Path) -> Self {
+        let store = Store::open(data_dir, dir);
+        ProjectStore {
+            history: store.history(),
+            store,
+        }
+    }
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf, claude: String, projects: Projects, launch: usize) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        claude: String,
+        projects: Projects,
+        launch: usize,
+        pick_folder: FolderPicker,
+    ) -> Self {
         let stores = projects
             .entries
             .iter()
-            .map(|entry| {
-                let store = Store::open(&data_dir, &entry.path);
-                ProjectStore {
-                    history: store.history(),
-                    store,
-                }
-            })
+            .map(|entry| ProjectStore::open(&data_dir, &entry.path))
             .collect();
         App {
             data_dir,
@@ -65,6 +79,8 @@ impl App {
             markdown: CommonMarkCache::default(),
             view: View::default(),
             outline: None,
+            pick_folder,
+            picking: None,
         }
     }
 
@@ -77,6 +93,18 @@ impl App {
     }
 
     pub fn poll(&mut self) {
+        if let Some(picking) = &self.picking {
+            match picking.try_recv() {
+                Ok(folder) => {
+                    self.picking = None;
+                    if let Some(folder) = folder {
+                        self.add_project(&folder);
+                    }
+                }
+                Err(TryRecvError::Disconnected) => self.picking = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         let Some(events) = &self.events else { return };
         while let Ok(msg) = events.try_recv() {
             self.session.apply(msg);
@@ -125,8 +153,21 @@ impl App {
         self.view = View::default();
     }
 
+    fn add_project(&mut self, dir: &Path) {
+        let index = self.projects.add(dir);
+        if index == self.stores.len() {
+            let path = &self.projects.entries[index].path;
+            self.stores.push(ProjectStore::open(&self.data_dir, path));
+        }
+        self.save_projects();
+    }
+
     fn toggle_project(&mut self, project: usize) {
         self.projects.toggle(project);
+        self.save_projects();
+    }
+
+    fn save_projects(&self) {
         if let Err(error) = self.projects.save(&projects::file(&self.data_dir)) {
             eprintln!("turbo-harness: cannot save the project list: {error}");
         }
@@ -135,6 +176,11 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut click = None;
         let labels = self.projects.labels();
+        let add = egui::Button::new("Add project…");
+        if ui.add_enabled(self.picking.is_none(), add).clicked() {
+            self.picking = Some((self.pick_folder)());
+        }
+        ui.separator();
         ui.add_enabled_ui(!self.is_running(), |ui| {
             let now = store::now();
             egui::ScrollArea::vertical()

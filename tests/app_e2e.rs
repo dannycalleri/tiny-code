@@ -1,11 +1,13 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{Key, Role};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
-use turbo_harness::app::App;
+use egui_kittest::kittest::{NodeT, Queryable};
+use turbo_harness::app::{App, FolderPicker};
 use turbo_harness::projects::{self, Projects};
 use turbo_harness::store::{self, IndexEntry, Store};
 
@@ -56,12 +58,58 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 fn app_in(claude: &Path, launch: &Path) -> App {
+    app_with_picker(claude, launch, Box::new(|| mpsc::channel().1))
+}
+
+fn app_with_picker(claude: &Path, launch: &Path, picker: FolderPicker) -> App {
     let data_dir = data_dir_of(claude);
     let file = projects::file(&data_dir);
     let mut projects = Projects::load(&file);
     let launch = projects.add(launch);
     projects.save(&file).unwrap();
-    App::new(data_dir, claude.display().to_string(), projects, launch)
+    App::new(
+        data_dir,
+        claude.display().to_string(),
+        projects,
+        launch,
+        picker,
+    )
+}
+
+fn picker_that_sends(folder: Option<PathBuf>) -> FolderPicker {
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel();
+        tx.send(folder.clone()).unwrap();
+        rx
+    })
+}
+
+type OpenDialogs = Arc<Mutex<Vec<Sender<Option<PathBuf>>>>>;
+
+fn picker_that_waits() -> (FolderPicker, OpenDialogs) {
+    let open = Arc::new(Mutex::new(Vec::new()));
+    let dialogs = Arc::clone(&open);
+    let picker: FolderPicker = Box::new(move || {
+        let (tx, rx) = mpsc::channel();
+        dialogs.lock().unwrap().push(tx);
+        rx
+    });
+    (picker, open)
+}
+
+fn can_add_a_project(harness: &Harness<'_, App>) -> bool {
+    !harness
+        .get_by_label("Add project…")
+        .accesskit_node()
+        .is_disabled()
+}
+
+fn saved_projects(claude: &Path) -> Vec<PathBuf> {
+    Projects::load(&projects::file(&data_dir_of(claude)))
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect()
 }
 
 fn harness(claude: PathBuf) -> Harness<'static, App> {
@@ -364,5 +412,79 @@ fn a_project_whose_directory_is_gone_has_a_warning_and_does_not_run() {
     assert!(harness.query_by_label("✖ failed").is_none());
     assert!(!argv.exists());
     let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_picked_folder_becomes_a_project_with_its_sessions() {
+    let claude = fake_claude_for("hello.jsonl", "pick");
+    let root = temp_root("pick");
+    let delta = root.join("delta");
+    std::fs::create_dir_all(&delta).unwrap();
+    write_past_session(
+        &Store::open(&data_dir_of(&claude), &delta),
+        "s",
+        "Delta task",
+    );
+    let app = app_with_picker(&claude, &work_dir(), picker_that_sends(Some(delta.clone())));
+    let mut harness = harness_of(app, [900.0, 1400.0]);
+
+    assert!(harness.query_by_label("delta").is_none());
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    harness.get_by_label("delta");
+    harness.get_by_label("Delta task");
+    assert_eq!(saved_projects(&claude), [work_dir(), delta]);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_cancelled_dialog_does_not_change_the_projects() {
+    let claude = fake_claude_for("hello.jsonl", "cancel");
+    let app = app_with_picker(&claude, &work_dir(), picker_that_sends(None));
+    let mut harness = harness_of(app, [900.0, 1400.0]);
+
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    assert_eq!(saved_projects(&claude), [work_dir()]);
+    assert!(can_add_a_project(&harness));
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_run_shows_its_events_while_the_folder_dialog_is_open() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-dialog-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "dialog",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let (picker, dialogs) = picker_that_waits();
+    let mut harness = harness_of(
+        app_with_picker(&claude, &work_dir(), picker),
+        [900.0, 1400.0],
+    );
+
+    send(&mut harness, "Say hello");
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    assert!(!can_add_a_project(&harness));
+    assert!(harness.query_by_label("Hello, nice to meet you!").is_none());
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    harness.get_by_label("Hello, nice to meet you!");
+    assert!(!can_add_a_project(&harness));
+
+    dialogs.lock().unwrap()[0].send(None).unwrap();
+    harness.run();
+    assert!(can_add_a_project(&harness));
+    assert_eq!(dialogs.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(gate);
     let _ = std::fs::remove_file(claude);
 }

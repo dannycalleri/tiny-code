@@ -1,7 +1,8 @@
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use eframe::egui;
-use turbo_harness::app::App;
+use turbo_harness::app::{App, FolderPicker};
 use turbo_harness::projects::{self, Projects};
 use turbo_harness::store::Store;
 
@@ -33,8 +34,25 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "turbo-harness",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new(data_dir, claude, projects, launch)))),
+        Box::new(|cc| {
+            let picker = folder_picker(cc.egui_ctx.clone());
+            Ok(Box::new(App::new(
+                data_dir, claude, projects, launch, picker,
+            )))
+        }),
     )
+}
+
+fn folder_picker(ctx: egui::Context) -> FolderPicker {
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(rfd::FileDialog::new().pick_folder());
+            ctx.request_repaint();
+        });
+        rx
+    })
 }
 
 fn working_dir(arg: Option<PathBuf>) -> Result<PathBuf, String> {
