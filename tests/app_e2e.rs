@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{Key, Role};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use turbo_harness::app::{App, FolderPicker};
-use turbo_harness::projects::{self, Projects};
-use turbo_harness::store::{self, IndexEntry, Store};
+use tiny_code::app::{App, FolderPicker};
+use tiny_code::projects::{self, Projects};
+use tiny_code::store::{self, IndexEntry, Store};
 
 fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
     fake_claude_with(fixture, name, "")
@@ -17,10 +17,8 @@ fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
 
 fn fake_claude_with(fixture: &str, name: &str, env: &str) -> PathBuf {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let wrapper = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-{name}.sh",
-        std::process::id()
-    ));
+    let wrapper =
+        std::env::temp_dir().join(format!("tiny-code-e2e-{}-{name}.sh", std::process::id()));
     std::fs::write(
         &wrapper,
         format!(
@@ -48,10 +46,8 @@ fn store_of(claude: &Path) -> Store {
 }
 
 fn temp_root(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-{name}-root",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("tiny-code-e2e-{}-{name}-root", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root.canonicalize().unwrap()
@@ -309,7 +305,7 @@ fn write_past_session(store: &Store, id: &str, title: &str) {
 #[test]
 fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
     const ID: &str = "9e26b157-1db2-4ff3-99fc-8737a92f55ba";
-    let argv = std::env::temp_dir().join(format!("turbo-harness-e2e-{}-argv", std::process::id()));
+    let argv = std::env::temp_dir().join(format!("tiny-code-e2e-{}-argv", std::process::id()));
     let claude = fake_claude_with(
         "hello.jsonl",
         "history",
@@ -384,10 +380,7 @@ fn each_project_lists_its_own_sessions_and_stays_collapsed_after_a_restart() {
 
 #[test]
 fn a_project_whose_directory_is_gone_has_a_warning_and_does_not_run() {
-    let argv = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-gone-argv",
-        std::process::id()
-    ));
+    let argv = std::env::temp_dir().join(format!("tiny-code-e2e-{}-gone-argv", std::process::id()));
     let _ = std::fs::remove_file(&argv);
     let claude = fake_claude_with(
         "hello.jsonl",
@@ -454,10 +447,8 @@ fn a_cancelled_dialog_does_not_change_the_projects() {
 
 #[test]
 fn a_run_shows_its_events_while_the_folder_dialog_is_open() {
-    let gate = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-dialog-gate",
-        std::process::id()
-    ));
+    let gate =
+        std::env::temp_dir().join(format!("tiny-code-e2e-{}-dialog-gate", std::process::id()));
     let _ = std::fs::remove_file(&gate);
     let claude = fake_claude_with(
         "hello.jsonl",
@@ -492,7 +483,7 @@ fn a_run_shows_its_events_while_the_folder_dialog_is_open() {
 #[test]
 fn two_sessions_run_side_by_side_and_keep_their_own_events() {
     let gate = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-parallel-gate",
+        "tiny-code-e2e-{}-parallel-gate",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&gate);
@@ -538,7 +529,7 @@ fn two_sessions_run_side_by_side_and_keep_their_own_events() {
 #[test]
 fn the_index_entry_is_written_while_the_first_run_is_still_active() {
     let gate = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-early-index-gate",
+        "tiny-code-e2e-{}-early-index-gate",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&gate);
@@ -588,10 +579,8 @@ fn an_entry_left_running_by_a_crash_does_not_show_as_running() {
 
 #[test]
 fn a_collapsed_project_shows_how_many_of_its_sessions_run() {
-    let gate = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-label-gate",
-        std::process::id()
-    ));
+    let gate =
+        std::env::temp_dir().join(format!("tiny-code-e2e-{}-label-gate", std::process::id()));
     let _ = std::fs::remove_file(&gate);
     let claude = fake_claude_with(
         "hello.jsonl",
@@ -621,7 +610,7 @@ fn a_collapsed_project_shows_how_many_of_its_sessions_run() {
 #[test]
 fn the_running_status_fits_beside_a_long_project_label_without_widening_the_sidebar() {
     let gate = std::env::temp_dir().join(format!(
-        "turbo-harness-e2e-{}-long-label-gate",
+        "tiny-code-e2e-{}-long-label-gate",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&gate);

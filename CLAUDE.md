@@ -1,4 +1,4 @@
-# turbo-harness
+# tiny-code
 
 A Rust + egui desktop app that drives Claude Code in headless mode (`claude -p … --output-format stream-json`).
 Specs: OpenSpec store `turbo-harness` in `~/coding/openspec` (`openspec list --store turbo-harness`).

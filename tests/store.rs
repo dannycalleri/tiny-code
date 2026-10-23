@@ -1,13 +1,11 @@
 use std::path::Path;
 
-use turbo_harness::store::{IndexEntry, Store};
+use tiny_code::store::{IndexEntry, Store};
 
 #[test]
 fn two_writers_saving_at_the_same_time_lose_no_entries() {
-    let root = std::env::temp_dir().join(format!(
-        "turbo-harness-{}-store-concurrent",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("tiny-code-{}-store-concurrent", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let store = Store::open(&root, Path::new("/home/user/demo"));
     let writers: Vec<_> = ["a", "b"]

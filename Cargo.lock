@@ -3385,6 +3385,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiny-code"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "eframe",
+ "egui",
+ "egui_commonmark",
+ "egui_kittest",
+ "libc",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "tiny-skia"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3519,22 +3535,6 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
-
-[[package]]
-name = "turbo-harness"
-version = "0.1.0"
-dependencies = [
- "directories",
- "eframe",
- "egui",
- "egui_commonmark",
- "egui_kittest",
- "libc",
- "rfd",
- "serde",
- "serde_json",
- "sha2",
-]
 
 [[package]]
 name = "type-map"

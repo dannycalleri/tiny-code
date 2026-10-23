@@ -31,7 +31,14 @@ impl Store {
     }
 
     pub fn default_data_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "turbo-harness").map(|d| d.data_dir().to_path_buf())
+        let dir =
+            |name| directories::ProjectDirs::from("", "", name).map(|d| d.data_dir().to_path_buf());
+        let data_dir = dir("tiny-code")?;
+        // The app was called turbo-harness before; its sessions move over on the first launch.
+        if let Some(old) = dir("turbo-harness") {
+            move_old_data_dir(&old, &data_dir);
+        }
+        Some(data_dir)
     }
 
     pub fn log_path(&self, session_id: &str) -> PathBuf {
@@ -91,6 +98,12 @@ impl Store {
             writer.set_session(id);
         }
         writer
+    }
+}
+
+fn move_old_data_dir(old: &Path, new: &Path) {
+    if old.is_dir() && !new.exists() {
+        let _ = fs::rename(old, new);
     }
 }
 
@@ -174,7 +187,7 @@ mod tests {
 
     fn temp_store(name: &str) -> Store {
         let root =
-            std::env::temp_dir().join(format!("turbo-harness-store-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("tiny-code-store-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         Store::open(&root, Path::new("/home/user/demo"))
     }
@@ -188,6 +201,21 @@ mod tests {
             cost_usd: Some(cost),
             status: "done".into(),
         }
+    }
+
+    #[test]
+    fn the_old_data_dir_moves_to_the_new_name_only_when_the_new_one_is_missing() {
+        let root = std::env::temp_dir().join(format!("tiny-code-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (old, new) = (root.join("turbo-harness"), root.join("tiny-code"));
+        fs::create_dir_all(old.join("sessions")).unwrap();
+        move_old_data_dir(&old, &new);
+        assert!(!old.exists() && new.join("sessions").is_dir());
+
+        fs::create_dir_all(&old).unwrap();
+        move_old_data_dir(&old, &new);
+        assert!(old.is_dir() && new.join("sessions").is_dir());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
