@@ -1,0 +1,6 @@
+{"type": "system", "subtype": "init", "session_id": "orphan-1", "model": "claude-opus-5-5", "cwd": "/home/user/demo"}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": {"command": "ls"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_bash", "content": "a.txt"}]}}
+{"type": "assistant", "parent_tool_use_id": "toolu_bash", "message": {"content": [{"type": "text", "text": "Nested under Bash"}]}}
+{"type": "assistant", "parent_tool_use_id": "toolu_gone", "message": {"content": [{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {"file_path": "/home/user/demo/a.txt"}}]}}
+{"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": 0.01, "duration_ms": 900, "num_turns": 2, "session_id": "orphan-1", "result": "Done."}
