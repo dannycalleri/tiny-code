@@ -110,17 +110,25 @@ impl App {
                 Err(TryRecvError::Empty) => {}
             }
         }
+        let mut reported = Vec::new();
         let mut ended = Vec::new();
         for (index, slot) in self.slots.iter_mut().enumerate() {
             let Some(events) = &slot.events else { continue };
+            let had_id = run_has_session_id(&slot.session);
             while let Ok(msg) = events.try_recv() {
                 slot.session.apply(msg);
+            }
+            if !had_id && run_has_session_id(&slot.session) {
+                reported.push(index);
             }
             if !slot.session.is_running() {
                 slot.events = None;
                 slot.stopper = None;
                 ended.push(index);
             }
+        }
+        for &index in &reported {
+            self.save_index(index);
         }
         for &index in &ended {
             self.save_index(index);
@@ -406,6 +414,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+}
+
+fn run_has_session_id(session: &Session) -> bool {
+    session
+        .current()
+        .is_some_and(|run| run.session_id.is_some())
 }
 
 fn ago(now: u64, then: u64) -> String {

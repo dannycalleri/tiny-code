@@ -534,3 +534,54 @@ fn two_sessions_run_side_by_side_and_keep_their_own_events() {
     let _ = std::fs::remove_file(gate);
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn the_index_entry_is_written_while_the_first_run_is_still_active() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-early-index-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "early-index",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Say hello");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store_of(&claude).index().is_empty() {
+        assert!(Instant::now() < deadline, "no index entry during the run");
+        std::thread::sleep(Duration::from_millis(10));
+        harness.step();
+    }
+    assert!(harness.state().is_running());
+    let index = store_of(&claude).index();
+    assert_eq!(
+        (index[0].title.as_str(), index[0].status.as_str()),
+        ("Say hello", "running")
+    );
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    let index = store_of(&claude).index();
+    assert_eq!((index.len(), index[0].status.as_str()), (1, "done"));
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn an_entry_left_running_by_a_crash_does_not_show_as_running() {
+    let claude = fake_claude_for("hello.jsonl", "crashed");
+    let store = store_of(&claude);
+    write_past_session(&store, "s", "Interrupted task");
+    let mut entry = store.index().remove(0);
+    entry.status = "running".into();
+    store.save_entry(entry).unwrap();
+    let harness = harness(claude.clone());
+
+    harness.get_by_role_and_label(Role::Button, "Interrupted task");
+    assert!(harness.query_by_label("⏺ running").is_none());
+    let _ = std::fs::remove_file(claude);
+}
