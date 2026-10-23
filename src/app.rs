@@ -227,9 +227,40 @@ impl App {
                     let header = egui::Button::new(egui::RichText::new(text).strong())
                         .frame(false)
                         .truncate();
-                    if ui.add(header).on_hover_text(hover).clicked() {
-                        click = Some(SidebarClick::Toggle(index));
-                    }
+                    let running = self
+                        .slots
+                        .iter()
+                        .filter(|s| s.project == index && s.session.is_running())
+                        .count();
+                    ui.horizontal(|ui| {
+                        let status = projects::running_label(running).map(|status| {
+                            egui::WidgetText::from(
+                                egui::RichText::new(status)
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                            )
+                            .into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Extend),
+                                f32::INFINITY,
+                                egui::TextStyle::Small,
+                            )
+                        });
+                        let reserved = status
+                            .as_ref()
+                            .map_or(0.0, |g| g.size().x + ui.spacing().item_spacing.x);
+                        let size = egui::vec2(
+                            ui.available_width() - reserved,
+                            ui.spacing().interact_size.y,
+                        );
+                        let header = ui.allocate_ui(size, |ui| ui.add(header)).inner;
+                        if header.on_hover_text(hover).clicked() {
+                            click = Some(SidebarClick::Toggle(index));
+                        }
+                        if let Some(status) = status {
+                            ui.label(status);
+                        }
+                    });
                     if project.collapsed {
                         continue;
                     }

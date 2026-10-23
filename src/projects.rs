@@ -77,6 +77,10 @@ impl Projects {
     }
 }
 
+pub fn running_label(count: usize) -> Option<String> {
+    (count > 0).then(|| format!("⏺ {count} running"))
+}
+
 fn folder_names(path: &Path) -> Vec<String> {
     path.components()
         .filter_map(|c| match c {
@@ -176,6 +180,13 @@ mod tests {
             projects(&["/x/app", "/y/app", "/z/other"]).labels(),
             ["x/app", "y/app", "other"]
         );
+    }
+
+    #[test]
+    fn running_label_counts_the_running_sessions() {
+        assert_eq!(running_label(0), None);
+        assert_eq!(running_label(1).as_deref(), Some("⏺ 1 running"));
+        assert_eq!(running_label(2).as_deref(), Some("⏺ 2 running"));
     }
 
     #[test]

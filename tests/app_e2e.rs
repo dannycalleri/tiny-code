@@ -585,3 +585,70 @@ fn an_entry_left_running_by_a_crash_does_not_show_as_running() {
     assert!(harness.query_by_label("⏺ running").is_none());
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn a_collapsed_project_shows_how_many_of_its_sessions_run() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-label-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "label",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let label = work_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Say hello");
+    harness.get_by_label(&label).click();
+    harness.run();
+    assert!(harness.query_by_label("New session").is_none());
+    harness.get_by_label("⏺ 1 running");
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    assert!(harness.query_by_label_contains("running").is_none());
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn the_running_status_fits_beside_a_long_project_label_without_widening_the_sidebar() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-long-label-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "long-label",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let root = temp_root("long-label");
+    let long = root.join("a-project-folder-with-a-name-far-wider-than-the-sidebar");
+    std::fs::create_dir_all(&long).unwrap();
+    let mut harness = harness_of(app_in(&claude, &long), [900.0, 1400.0]);
+    let sidebar_edge =
+        |harness: &Harness<'_, App>| harness.get_by_role(Role::MultilineTextInput).rect().left();
+    let idle_edge = sidebar_edge(&harness);
+
+    send(&mut harness, "Say hello");
+    let status = harness.get_by_label("⏺ 1 running").rect();
+    assert_eq!(sidebar_edge(&harness), idle_edge, "the sidebar grew");
+    assert!(
+        status.right() <= idle_edge,
+        "{status:?} is past {idle_edge}"
+    );
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
