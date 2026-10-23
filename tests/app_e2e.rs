@@ -11,6 +11,9 @@ use tiny_code::app::{App, FolderPicker};
 use tiny_code::projects::{self, Projects};
 use tiny_code::store::{self, IndexEntry, Store};
 
+// Generous because a passing run ends in well under a second; the full suite in parallel slowed one past 5 s.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
     fake_claude_with(fixture, name, "")
 }
@@ -141,7 +144,7 @@ fn send(harness: &mut Harness<'_, App>, prompt: &str) {
 }
 
 fn wait_for_the_run(harness: &mut Harness<'_, App>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + RUN_TIMEOUT;
     while harness.state().is_running() {
         assert!(Instant::now() < deadline, "the run did not end");
         std::thread::sleep(Duration::from_millis(10));
@@ -541,7 +544,7 @@ fn the_index_entry_is_written_while_the_first_run_is_still_active() {
     let mut harness = harness(claude.clone());
 
     send(&mut harness, "Say hello");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + RUN_TIMEOUT;
     while store_of(&claude).index().is_empty() {
         assert!(Instant::now() < deadline, "no index entry during the run");
         std::thread::sleep(Duration::from_millis(10));
