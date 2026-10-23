@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -51,10 +52,21 @@ impl Store {
     }
 
     pub fn save_entry(&self, entry: IndexEntry) -> io::Result<()> {
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        fs::create_dir_all(&self.dir)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("index.lock"))?;
+        lock.lock()?;
         let mut entries = self.index();
         upsert(&mut entries, entry);
-        fs::create_dir_all(&self.dir)?;
-        let tmp = self.dir.join("index.json.tmp");
+        let tmp = self.dir.join(format!(
+            "index.json.{}-{}.tmp",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&tmp, serde_json::to_vec_pretty(&entries)?)?;
         fs::rename(tmp, self.dir.join("index.json"))
     }
@@ -224,7 +236,11 @@ mod tests {
         store.save_entry(entry("a", "first", 1, 0.1)).unwrap();
         store.save_entry(entry("b", "second", 2, 0.2)).unwrap();
         assert_eq!(store.index().len(), 2);
-        assert!(!store.dir.join("index.json.tmp").exists());
+        let tmp_files = fs::read_dir(&store.dir)
+            .unwrap()
+            .filter(|f| f.as_ref().unwrap().path().extension() == Some("tmp".as_ref()))
+            .count();
+        assert_eq!(tmp_files, 0);
     }
 
     #[test]

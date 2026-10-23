@@ -1,11 +1,14 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::Role;
+use eframe::egui::{Key, Role};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
-use turbo_harness::app::App;
+use egui_kittest::kittest::{NodeT, Queryable};
+use turbo_harness::app::{App, FolderPicker};
+use turbo_harness::projects::{self, Projects};
 use turbo_harness::store::{self, IndexEntry, Store};
 
 fn fake_claude_for(fixture: &str, name: &str) -> PathBuf {
@@ -32,8 +35,81 @@ fn fake_claude_with(fixture: &str, name: &str, env: &str) -> PathBuf {
     wrapper
 }
 
+fn work_dir() -> PathBuf {
+    std::env::temp_dir().canonicalize().unwrap()
+}
+
+fn data_dir_of(claude: &Path) -> PathBuf {
+    claude.with_extension("store")
+}
+
 fn store_of(claude: &Path) -> Store {
-    Store::open(&claude.with_extension("store"), &std::env::temp_dir())
+    Store::open(&data_dir_of(claude), &work_dir())
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-{name}-root",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    root.canonicalize().unwrap()
+}
+
+fn app_in(claude: &Path, launch: &Path) -> App {
+    app_with_picker(claude, launch, Box::new(|| mpsc::channel().1))
+}
+
+fn app_with_picker(claude: &Path, launch: &Path, picker: FolderPicker) -> App {
+    let data_dir = data_dir_of(claude);
+    let file = projects::file(&data_dir);
+    let mut projects = Projects::load(&file);
+    let launch = projects.add(launch);
+    projects.save(&file).unwrap();
+    App::new(
+        data_dir,
+        claude.display().to_string(),
+        projects,
+        launch,
+        picker,
+    )
+}
+
+fn picker_that_sends(folder: Option<PathBuf>) -> FolderPicker {
+    Box::new(move || {
+        let (tx, rx) = mpsc::channel();
+        tx.send(folder.clone()).unwrap();
+        rx
+    })
+}
+
+type OpenDialogs = Arc<Mutex<Vec<Sender<Option<PathBuf>>>>>;
+
+fn picker_that_waits() -> (FolderPicker, OpenDialogs) {
+    let open = Arc::new(Mutex::new(Vec::new()));
+    let dialogs = Arc::clone(&open);
+    let picker: FolderPicker = Box::new(move || {
+        let (tx, rx) = mpsc::channel();
+        dialogs.lock().unwrap().push(tx);
+        rx
+    });
+    (picker, open)
+}
+
+fn can_add_a_project(harness: &Harness<'_, App>) -> bool {
+    !harness
+        .get_by_label("Add project…")
+        .accesskit_node()
+        .is_disabled()
+}
+
+fn saved_projects(claude: &Path) -> Vec<PathBuf> {
+    Projects::load(&projects::file(&data_dir_of(claude)))
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect()
 }
 
 fn harness(claude: PathBuf) -> Harness<'static, App> {
@@ -41,11 +117,10 @@ fn harness(claude: PathBuf) -> Harness<'static, App> {
 }
 
 fn harness_sized(claude: PathBuf, size: [f32; 2]) -> Harness<'static, App> {
-    let app = App::new(
-        std::env::temp_dir(),
-        claude.display().to_string(),
-        store_of(&claude),
-    );
+    harness_of(app_in(&claude, &work_dir()), size)
+}
+
+fn harness_of(app: App, size: [f32; 2]) -> Harness<'static, App> {
     Harness::builder()
         .with_size(size)
         .with_max_steps(16)
@@ -201,7 +276,7 @@ fn clicking_a_nested_call_in_the_outline_opens_and_shows_its_card() {
 
     let card = harness.get_by_role_and_label(Role::Label, "Read").rect();
     let top = harness
-        .get_by_label(&std::env::temp_dir().display().to_string())
+        .get_by_label(&work_dir().display().to_string())
         .rect()
         .bottom();
     let bottom = harness.get_by_role(Role::MultilineTextInput).rect().top();
@@ -210,6 +285,25 @@ fn clicking_a_nested_call_in_the_outline_opens_and_shows_its_card() {
         "{card:?} not in {top}..{bottom}"
     );
     let _ = std::fs::remove_file(claude);
+}
+
+fn write_past_session(store: &Store, id: &str, title: &str) {
+    let mut log = store.log_writer(Some(id));
+    log.write(&store::prompt_line(title, 1));
+    for line in include_str!("fixtures/hello.jsonl").lines() {
+        log.write(line);
+    }
+    log.write(&store::exit_line(Some(0), &[], false));
+    store
+        .save_entry(IndexEntry {
+            session_id: id.into(),
+            title: title.into(),
+            started_at: 50,
+            updated_at: 1,
+            cost_usd: Some(0.05),
+            status: "done".into(),
+        })
+        .unwrap();
 }
 
 #[test]
@@ -222,22 +316,7 @@ fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
         &format!("FAKE_ARGV='{}'", argv.display()),
     );
     let store = store_of(&claude);
-    let mut log = store.log_writer(Some(ID));
-    log.write(&store::prompt_line("Say hello", 1));
-    for line in include_str!("fixtures/hello.jsonl").lines() {
-        log.write(line);
-    }
-    log.write(&store::exit_line(Some(0), &[], false));
-    store
-        .save_entry(IndexEntry {
-            session_id: ID.into(),
-            title: "Say hello".into(),
-            started_at: 50,
-            updated_at: 1,
-            cost_usd: Some(0.05),
-            status: "done".into(),
-        })
-        .unwrap();
+    write_past_session(&store, ID, "Say hello");
     let mut harness = harness(claude.clone());
 
     assert!(harness.query_by_label("Hello, nice to meet you!").is_none());
@@ -266,5 +345,310 @@ fn a_past_session_reopens_and_continues_and_a_new_one_starts_fresh() {
     wait_for_the_run(&mut harness);
     assert!(!std::fs::read_to_string(&argv).unwrap().contains("--resume"));
     let _ = std::fs::remove_file(argv);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn each_project_lists_its_own_sessions_and_stays_collapsed_after_a_restart() {
+    let claude = fake_claude_for("hello.jsonl", "projects");
+    let root = temp_root("projects");
+    let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+    for (dir, title) in [(&alpha, "Alpha task"), (&beta, "Beta task")] {
+        std::fs::create_dir_all(dir).unwrap();
+        write_past_session(&Store::open(&data_dir_of(&claude), dir), "s", title);
+    }
+    let mut saved = Projects::default();
+    saved.add(&alpha);
+    saved.add(&beta);
+    saved.save(&projects::file(&data_dir_of(&claude))).unwrap();
+    let mut harness = harness_of(app_in(&claude, &alpha), [900.0, 1400.0]);
+
+    let tops: Vec<f32> = ["alpha", "Alpha task", "beta", "Beta task"]
+        .iter()
+        .map(|label| harness.get_by_label(label).rect().top())
+        .collect();
+    assert!(tops.is_sorted(), "{tops:?}");
+
+    harness.get_by_label("beta").click();
+    harness.run();
+    assert!(harness.query_by_label("Beta task").is_none());
+    harness.get_by_label("Alpha task");
+
+    let harness = harness_of(app_in(&claude, &alpha), [900.0, 1400.0]);
+    harness.get_by_label("beta");
+    harness.get_by_label("Alpha task");
+    assert!(harness.query_by_label("Beta task").is_none());
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_project_whose_directory_is_gone_has_a_warning_and_does_not_run() {
+    let argv = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-gone-argv",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&argv);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "gone",
+        &format!("FAKE_ARGV='{}'", argv.display()),
+    );
+    let root = temp_root("gone");
+    let gone = root.join("vanished");
+    let mut harness = harness_of(app_in(&claude, &gone), [900.0, 1400.0]);
+
+    harness.get_by_label("⚠ vanished");
+    harness.get_by_role(Role::MultilineTextInput).click();
+    harness.run();
+    harness
+        .get_by_role(Role::MultilineTextInput)
+        .type_text("Hello?");
+    harness.run();
+    harness.key_press(Key::Enter);
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, "Send").click();
+    harness.run();
+    assert!(harness.query_by_label("✖ failed").is_none());
+    assert!(!argv.exists());
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_picked_folder_becomes_a_project_with_its_sessions() {
+    let claude = fake_claude_for("hello.jsonl", "pick");
+    let root = temp_root("pick");
+    let delta = root.join("delta");
+    std::fs::create_dir_all(&delta).unwrap();
+    write_past_session(
+        &Store::open(&data_dir_of(&claude), &delta),
+        "s",
+        "Delta task",
+    );
+    let app = app_with_picker(&claude, &work_dir(), picker_that_sends(Some(delta.clone())));
+    let mut harness = harness_of(app, [900.0, 1400.0]);
+
+    assert!(harness.query_by_label("delta").is_none());
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    harness.get_by_label("delta");
+    harness.get_by_label("Delta task");
+    assert_eq!(saved_projects(&claude), [work_dir(), delta]);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_cancelled_dialog_does_not_change_the_projects() {
+    let claude = fake_claude_for("hello.jsonl", "cancel");
+    let app = app_with_picker(&claude, &work_dir(), picker_that_sends(None));
+    let mut harness = harness_of(app, [900.0, 1400.0]);
+
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    assert_eq!(saved_projects(&claude), [work_dir()]);
+    assert!(can_add_a_project(&harness));
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_run_shows_its_events_while_the_folder_dialog_is_open() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-dialog-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "dialog",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let (picker, dialogs) = picker_that_waits();
+    let mut harness = harness_of(
+        app_with_picker(&claude, &work_dir(), picker),
+        [900.0, 1400.0],
+    );
+
+    send(&mut harness, "Say hello");
+    harness.get_by_label("Add project…").click();
+    harness.run();
+    assert!(!can_add_a_project(&harness));
+    assert!(harness.query_by_label("Hello, nice to meet you!").is_none());
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    harness.get_by_label("Hello, nice to meet you!");
+    assert!(!can_add_a_project(&harness));
+
+    dialogs.lock().unwrap()[0].send(None).unwrap();
+    harness.run();
+    assert!(can_add_a_project(&harness));
+    assert_eq!(dialogs.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn two_sessions_run_side_by_side_and_keep_their_own_events() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-parallel-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "parallel",
+        &format!("FAKE_SESSION_PER_RUN=1 FAKE_GATE='{}'", gate.display()),
+    );
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "First task");
+    harness
+        .get_by_role_and_label(Role::Button, "New session")
+        .click();
+    harness.run();
+    send(&mut harness, "Second task");
+    assert_eq!(harness.state().running_sessions(), 2);
+    harness.get_by_role_and_label(Role::Button, "First task");
+    harness.get_by_role_and_label(Role::Button, "Second task");
+    assert_eq!(harness.get_all_by_label("⏺ running").count(), 3);
+
+    harness
+        .get_by_role_and_label(Role::Button, "First task")
+        .click();
+    harness.run();
+    assert_eq!(harness.get_all_by_label("First task").count(), 2);
+    assert_eq!(harness.get_all_by_label("Second task").count(), 1);
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    assert_eq!(
+        harness.get_all_by_label("Hello, nice to meet you!").count(),
+        1
+    );
+    assert_eq!(harness.get_all_by_label("First task").count(), 2);
+    harness.get_by_role_and_label(Role::Button, "Second task");
+    assert!(harness.query_by_label("⏺ running").is_none());
+    assert_eq!(store_of(&claude).index().len(), 2);
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn the_index_entry_is_written_while_the_first_run_is_still_active() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-early-index-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "early-index",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Say hello");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store_of(&claude).index().is_empty() {
+        assert!(Instant::now() < deadline, "no index entry during the run");
+        std::thread::sleep(Duration::from_millis(10));
+        harness.step();
+    }
+    assert!(harness.state().is_running());
+    let index = store_of(&claude).index();
+    assert_eq!(
+        (index[0].title.as_str(), index[0].status.as_str()),
+        ("Say hello", "running")
+    );
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    let index = store_of(&claude).index();
+    assert_eq!((index.len(), index[0].status.as_str()), (1, "done"));
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn an_entry_left_running_by_a_crash_does_not_show_as_running() {
+    let claude = fake_claude_for("hello.jsonl", "crashed");
+    let store = store_of(&claude);
+    write_past_session(&store, "s", "Interrupted task");
+    let mut entry = store.index().remove(0);
+    entry.status = "running".into();
+    store.save_entry(entry).unwrap();
+    let harness = harness(claude.clone());
+
+    harness.get_by_role_and_label(Role::Button, "Interrupted task");
+    assert!(harness.query_by_label("⏺ running").is_none());
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn a_collapsed_project_shows_how_many_of_its_sessions_run() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-label-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "label",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let label = work_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "Say hello");
+    harness.get_by_label(&label).click();
+    harness.run();
+    assert!(harness.query_by_label("New session").is_none());
+    harness.get_by_label("⏺ 1 running");
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    assert!(harness.query_by_label_contains("running").is_none());
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
+
+#[test]
+fn the_running_status_fits_beside_a_long_project_label_without_widening_the_sidebar() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-long-label-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "long-label",
+        &format!("FAKE_GATE='{}'", gate.display()),
+    );
+    let root = temp_root("long-label");
+    let long = root.join("a-project-folder-with-a-name-far-wider-than-the-sidebar");
+    std::fs::create_dir_all(&long).unwrap();
+    let mut harness = harness_of(app_in(&claude, &long), [900.0, 1400.0]);
+    let sidebar_edge =
+        |harness: &Harness<'_, App>| harness.get_by_role(Role::MultilineTextInput).rect().left();
+    let idle_edge = sidebar_edge(&harness);
+
+    send(&mut harness, "Say hello");
+    let status = harness.get_by_label("⏺ 1 running").rect();
+    assert_eq!(sidebar_edge(&harness), idle_edge, "the sidebar grew");
+    assert!(
+        status.right() <= idle_edge,
+        "{status:?} is past {idle_edge}"
+    );
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_file(gate);
     let _ = std::fs::remove_file(claude);
 }

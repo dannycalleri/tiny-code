@@ -6,7 +6,14 @@
 # With $FAKE_HANG set, it then starts `sleep 30` in the background, writes its pid to that file and
 # waits, like a long tool call. $FAKE_IGNORE_TERM=leader or =grandchild makes that one ignore SIGTERM.
 # With $FAKE_ARGV set, it first writes its arguments to that file, one per line.
+# With $FAKE_SESSION_PER_RUN set, every session_id in the fixture becomes run-<pid>, so two runs
+# give two sessions.
 [ -n "$FAKE_ARGV" ] && printf '%s\n' "$@" > "$FAKE_ARGV"
+fixture=$FAKE_FIXTURE
+if [ -n "$FAKE_SESSION_PER_RUN" ]; then
+    fixture=$(mktemp)
+    sed "s/\"session_id\":\"[^\"]*\"/\"session_id\":\"run-$$\"/g" "$FAKE_FIXTURE" > "$fixture"
+fi
 first=1
 while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"
@@ -18,7 +25,8 @@ while IFS= read -r line || [ -n "$line" ]; do
             tries=$((tries + 1))
         done
     fi
-done < "$FAKE_FIXTURE"
+done < "$fixture"
+[ -n "$FAKE_SESSION_PER_RUN" ] && rm -f "$fixture"
 if [ -n "$FAKE_HANG" ]; then
     [ "$FAKE_IGNORE_TERM" = leader ] && trap '' TERM
     if [ "$FAKE_IGNORE_TERM" = grandchild ]; then
