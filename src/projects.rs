@@ -99,10 +99,8 @@ mod tests {
     use super::*;
 
     fn temp_file(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "turbo-harness-projects-{}-{name}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tiny-code-projects-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         root.join("projects.json")
     }

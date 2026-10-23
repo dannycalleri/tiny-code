@@ -161,7 +161,7 @@ impl App {
         };
         let project = &mut self.stores[*project];
         if let Err(error) = project.store.save_entry(entry) {
-            eprintln!("turbo-harness: cannot save the session index: {error}");
+            eprintln!("tiny-code: cannot save the session index: {error}");
         }
         project.history = project.store.history();
     }
@@ -199,7 +199,7 @@ impl App {
 
     fn save_projects(&self) {
         if let Err(error) = self.projects.save(&projects::file(&self.data_dir)) {
-            eprintln!("turbo-harness: cannot save the project list: {error}");
+            eprintln!("tiny-code: cannot save the project list: {error}");
         }
     }
 

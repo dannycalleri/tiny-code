@@ -3,11 +3,11 @@ use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use turbo_harness::event::{Event, parse_line};
-use turbo_harness::run::{Run, RunStatus};
-use turbo_harness::runner::{RunMsg, claude_command, start};
-use turbo_harness::session::Session;
-use turbo_harness::store::{self, Store};
+use tiny_code::event::{Event, parse_line};
+use tiny_code::run::{Run, RunStatus};
+use tiny_code::runner::{RunMsg, claude_command, start};
+use tiny_code::session::Session;
+use tiny_code::store::{self, Store};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -30,7 +30,7 @@ fn collect(rx: &Receiver<RunMsg>) -> (Vec<Event>, Option<i32>, Vec<String>) {
 }
 
 fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("turbo-harness-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!("tiny-code-{}-{name}", std::process::id()))
 }
 
 fn temp_store(name: &str) -> Store {
@@ -86,11 +86,11 @@ fn missing_binary_is_reported_as_not_on_path() {
 
 #[test]
 fn missing_working_directory_is_not_reported_as_missing_binary() {
-    let cmd = claude_command("sh", "hi", None, Path::new("/no/such/turbo-harness/dir"));
+    let cmd = claude_command("sh", "hi", None, Path::new("/no/such/tiny-code/dir"));
     let err = start(cmd, None, || {}).unwrap_err();
     assert_eq!(
         err,
-        "working directory /no/such/turbo-harness/dir does not exist"
+        "working directory /no/such/tiny-code/dir does not exist"
     );
 }
 

@@ -2,37 +2,37 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
-use turbo_harness::app::{App, FolderPicker};
-use turbo_harness::projects::{self, Projects};
-use turbo_harness::store::Store;
+use tiny_code::app::{App, FolderPicker};
+use tiny_code::projects::{self, Projects};
+use tiny_code::store::Store;
 
 fn main() -> eframe::Result {
     let dir = match working_dir(std::env::args_os().nth(1).map(PathBuf::from)) {
         Ok(dir) => dir,
         Err(message) => {
-            eprintln!("turbo-harness: {message}");
+            eprintln!("tiny-code: {message}");
             std::process::exit(2);
         }
     };
     let Some(data_dir) = Store::default_data_dir() else {
-        eprintln!("turbo-harness: cannot find the app data directory");
+        eprintln!("tiny-code: cannot find the app data directory");
         std::process::exit(2);
     };
     let file = projects::file(&data_dir);
     let mut projects = Projects::load(&file);
     let launch = projects.add(&dir);
     if let Err(error) = projects.save(&file) {
-        eprintln!("turbo-harness: cannot save the project list: {error}");
+        eprintln!("tiny-code: cannot save the project list: {error}");
     }
-    let claude = std::env::var("TURBO_HARNESS_CLAUDE").unwrap_or_else(|_| "claude".into());
+    let claude = std::env::var("TINY_CODE_CLAUDE").unwrap_or_else(|_| "claude".into());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("turbo-harness")
+            .with_title("tiny-code")
             .with_inner_size([1000.0, 700.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "turbo-harness",
+        "tiny-code",
         options,
         Box::new(|cc| {
             let picker = folder_picker(cc.egui_ctx.clone());
