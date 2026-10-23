@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -6,17 +6,30 @@ use eframe::egui;
 use egui_commonmark::CommonMarkCache;
 
 use crate::outline;
+use crate::projects::{self, Projects};
 use crate::run::{Run, RunStatus};
 use crate::runner::{self, RunMsg, Stopper};
 use crate::session::Session;
 use crate::store::{self, IndexEntry, Store};
 use crate::transcript::{self, View};
 
-pub struct App {
-    dir: PathBuf,
-    claude: String,
+struct ProjectStore {
     store: Store,
     history: Vec<IndexEntry>,
+}
+
+enum SidebarClick {
+    Toggle(usize),
+    NewSession(usize),
+    Open(usize, String),
+}
+
+pub struct App {
+    data_dir: PathBuf,
+    claude: String,
+    projects: Projects,
+    stores: Vec<ProjectStore>,
+    project: usize,
     prompt: String,
     session: Session,
     events: Option<Receiver<RunMsg>>,
@@ -27,12 +40,24 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(dir: PathBuf, claude: String, store: Store) -> Self {
+    pub fn new(data_dir: PathBuf, claude: String, projects: Projects, launch: usize) -> Self {
+        let stores = projects
+            .entries
+            .iter()
+            .map(|entry| {
+                let store = Store::open(&data_dir, &entry.path);
+                ProjectStore {
+                    history: store.history(),
+                    store,
+                }
+            })
+            .collect();
         App {
-            dir,
+            data_dir,
             claude,
-            history: store.history(),
-            store,
+            projects,
+            stores,
+            project: launch,
             prompt: String::new(),
             session: Session::default(),
             events: None,
@@ -41,6 +66,10 @@ impl App {
             view: View::default(),
             outline: None,
         }
+    }
+
+    fn dir(&self) -> &Path {
+        &self.projects.entries[self.project].path
     }
 
     pub fn is_running(&self) -> bool {
@@ -76,52 +105,94 @@ impl App {
             cost_usd: self.session.totals().and_then(|t| t.cost_usd),
             status: format!("{:?}", last.status).to_lowercase(),
         };
-        if let Err(error) = self.store.save_entry(entry) {
+        let project = &mut self.stores[self.project];
+        if let Err(error) = project.store.save_entry(entry) {
             eprintln!("turbo-harness: cannot save the session index: {error}");
         }
-        self.history = self.store.history();
+        project.history = project.store.history();
     }
 
-    fn open_session(&mut self, session_id: &str) {
-        self.session = Session::replay(&self.store.read_log(session_id));
+    fn open_session(&mut self, project: usize, session_id: &str) {
+        self.project = project;
+        self.session = Session::replay(&self.stores[project].store.read_log(session_id));
         self.view = View::default();
         self.view.jump_to_latest();
     }
 
-    fn new_session(&mut self) {
+    fn new_session(&mut self, project: usize) {
+        self.project = project;
         self.session = Session::default();
         self.view = View::default();
     }
 
+    fn toggle_project(&mut self, project: usize) {
+        self.projects.toggle(project);
+        if let Err(error) = self.projects.save(&projects::file(&self.data_dir)) {
+            eprintln!("turbo-harness: cannot save the project list: {error}");
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let mut open = None;
+        let mut click = None;
+        let labels = self.projects.labels();
         ui.add_enabled_ui(!self.is_running(), |ui| {
-            if ui.button("New session").clicked() {
-                self.new_session();
-            }
-            ui.separator();
             let now = store::now();
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    for entry in &self.history {
-                        let selected = self.session.session_id() == Some(&entry.session_id);
-                        let title = egui::Button::selectable(selected, &entry.title).truncate();
-                        if ui.add(title).clicked() {
-                            open = Some(entry.session_id.clone());
+                    for (index, (project, label)) in
+                        self.projects.entries.iter().zip(&labels).enumerate()
+                    {
+                        let path = project.path.display().to_string();
+                        let (text, hover) = if project.path.is_dir() {
+                            (label.clone(), path)
+                        } else {
+                            (format!("⚠ {label}"), format!("{path} does not exist"))
+                        };
+                        let header = egui::Button::new(egui::RichText::new(text).strong())
+                            .frame(false)
+                            .truncate();
+                        let header = ui
+                            .add(header)
+                            .on_hover_text(&hover)
+                            .on_disabled_hover_text(hover);
+                        if header.clicked() {
+                            click = Some(SidebarClick::Toggle(index));
                         }
-                        let detail = format!(
-                            "{} · {}",
-                            ago(now, entry.updated_at),
-                            transcript::cost_label(entry.cost_usd)
-                        );
-                        ui.label(egui::RichText::new(detail).small().weak());
-                        ui.add_space(4.0);
+                        if project.collapsed {
+                            continue;
+                        }
+                        ui.indent(index, |ui| {
+                            if ui.button("New session").clicked() {
+                                click = Some(SidebarClick::NewSession(index));
+                            }
+                            for entry in &self.stores[index].history {
+                                let selected = self.project == index
+                                    && self.session.session_id() == Some(&entry.session_id);
+                                let title =
+                                    egui::Button::selectable(selected, &entry.title).truncate();
+                                if ui.add(title).clicked() {
+                                    click =
+                                        Some(SidebarClick::Open(index, entry.session_id.clone()));
+                                }
+                                let detail = format!(
+                                    "{} · {}",
+                                    ago(now, entry.updated_at),
+                                    transcript::cost_label(entry.cost_usd)
+                                );
+                                ui.label(egui::RichText::new(detail).small().weak());
+                                ui.add_space(4.0);
+                            }
+                        });
+                        ui.add_space(8.0);
                     }
                 });
         });
-        if let Some(id) = open {
-            self.open_session(&id);
+        match click {
+            Some(SidebarClick::Toggle(project)) => self.toggle_project(project),
+            Some(SidebarClick::NewSession(project)) => self.new_session(project),
+            Some(SidebarClick::Open(project, id)) => self.open_session(project, &id),
+            None => {}
         }
     }
 
@@ -135,7 +206,7 @@ impl App {
             .show(ui, |ui| self.sidebar(ui));
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(self.dir.display().to_string());
+                ui.label(self.dir().display().to_string());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.selectable_label(show_outline, "Outline").clicked() {
                         self.outline = Some(!show_outline);
@@ -175,7 +246,11 @@ impl App {
                     if ui.button("⏹ Stop").clicked() {
                         self.stop();
                     }
-                } else if enter || ui.button("Send").clicked() {
+                } else if enter
+                    || ui
+                        .add_enabled(self.dir().is_dir(), egui::Button::new("Send"))
+                        .clicked()
+                {
                     self.send(ui.ctx());
                 }
             });
@@ -200,14 +275,16 @@ impl App {
     }
 
     fn send(&mut self, ctx: &egui::Context) {
-        if !self.session.can_send(&self.prompt) {
+        if !self.session.can_send(&self.prompt) || !self.dir().is_dir() {
             return;
         }
         let prompt = self.prompt.trim().to_string();
         let cmd =
-            runner::claude_command(&self.claude, &prompt, self.session.session_id(), &self.dir);
+            runner::claude_command(&self.claude, &prompt, self.session.session_id(), self.dir());
         let started_at = store::now();
-        let mut log = self.store.log_writer(self.session.session_id());
+        let mut log = self.stores[self.project]
+            .store
+            .log_writer(self.session.session_id());
         log.write(&store::prompt_line(&prompt, started_at));
         let ctx = ctx.clone();
         match runner::start(cmd, Some(log), move || ctx.request_repaint()) {

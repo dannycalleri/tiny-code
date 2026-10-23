@@ -15,6 +15,10 @@ pub struct Projects {
     pub entries: Vec<ProjectEntry>,
 }
 
+pub fn file(data_dir: &Path) -> PathBuf {
+    data_dir.join("projects.json")
+}
+
 impl Projects {
     pub fn load(path: &Path) -> Projects {
         fs::read(path)
