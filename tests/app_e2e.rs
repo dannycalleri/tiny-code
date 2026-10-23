@@ -488,3 +488,49 @@ fn a_run_shows_its_events_while_the_folder_dialog_is_open() {
     let _ = std::fs::remove_file(gate);
     let _ = std::fs::remove_file(claude);
 }
+
+#[test]
+fn two_sessions_run_side_by_side_and_keep_their_own_events() {
+    let gate = std::env::temp_dir().join(format!(
+        "turbo-harness-e2e-{}-parallel-gate",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&gate);
+    let claude = fake_claude_with(
+        "hello.jsonl",
+        "parallel",
+        &format!("FAKE_SESSION_PER_RUN=1 FAKE_GATE='{}'", gate.display()),
+    );
+    let mut harness = harness(claude.clone());
+
+    send(&mut harness, "First task");
+    harness
+        .get_by_role_and_label(Role::Button, "New session")
+        .click();
+    harness.run();
+    send(&mut harness, "Second task");
+    assert_eq!(harness.state().running_sessions(), 2);
+    harness.get_by_role_and_label(Role::Button, "First task");
+    harness.get_by_role_and_label(Role::Button, "Second task");
+    assert_eq!(harness.get_all_by_label("⏺ running").count(), 3);
+
+    harness
+        .get_by_role_and_label(Role::Button, "First task")
+        .click();
+    harness.run();
+    assert_eq!(harness.get_all_by_label("First task").count(), 2);
+    assert_eq!(harness.get_all_by_label("Second task").count(), 1);
+
+    std::fs::write(&gate, "").unwrap();
+    wait_for_the_run(&mut harness);
+    assert_eq!(
+        harness.get_all_by_label("Hello, nice to meet you!").count(),
+        1
+    );
+    assert_eq!(harness.get_all_by_label("First task").count(), 2);
+    harness.get_by_role_and_label(Role::Button, "Second task");
+    assert!(harness.query_by_label("⏺ running").is_none());
+    assert_eq!(store_of(&claude).index().len(), 2);
+    let _ = std::fs::remove_file(gate);
+    let _ = std::fs::remove_file(claude);
+}
